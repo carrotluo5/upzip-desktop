@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://example.invalid/paranoia-enc-decryptor"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = "s"
+panic = "abort"
+
+[profile.release.package.paranoia-enc-core]
+opt-level = 3
+
+# Keep the heavy crypto crates optimized even in dev/test builds, otherwise Argon2id
+# (20 iterations, 20 MiB) makes the test suite unnecessarily slow.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.skein]
+opt-level = 3
+
+[profile.dev.package.blake3]
+opt-level = 3
+
+[profile.dev.package.sha3]
+opt-level = 3

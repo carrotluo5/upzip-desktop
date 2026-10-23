@@ -1,0 +1,44 @@
+# ---- Build artifacts ----
+target/
+**/target/
+dist/
+build/
+*.app/
+*.dmg
+*.msi
+*.nsis
+*.pkg
+*.exe
+*.dSYM/
+gui/src-tauri/gen/
+
+# ---- Dependencies ----
+node_modules/
+.pnpm-store/
+vendor/bundle/
+
+# ---- Decrypted plaintext outputs / user samples (NEVER commit) ----
+/out/
+/decrypted/
+*.decrypted
+*.7z
+# keep test fixtures:
+!/crates/core/tests/fixtures/*.enc
+
+# ---- Local password memory store (plaintext password; NEVER commit) ----
+# Runtime location is outside the repo (OS user config dir), ignored here too for safety.
+config.json
+password-store.json
+secrets.json
+.env
+.env.*
+
+# ---- Logs / scratch / OS noise ----
+*.log
+*.tmp
+*.part
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,24 @@
+[package]
+name = "paranoia-enc-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core format and cryptography library for decrypting Paranoia File Encryption v4 (.enc) AES-256 files"
+repository.workspace = true
+
+[dependencies]
+aes = "0.9"
+cipher = "0.5"
+ctr = "0.10"
+digest = "0.11"
+skein = "0.2"
+sha3 = "0.12"
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
+blake3 = "1"
+zip = { version = "9", default-features = false, features = ["deflate", "zstd"] }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+sha2 = "0.10"

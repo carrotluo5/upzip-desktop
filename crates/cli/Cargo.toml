@@ -1,0 +1,16 @@
+[package]
+name = "paranoia-enc-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Headless CLI for paranoia-enc-decryptor (verification and scripting)"
+repository.workspace = true
+
+[[bin]]
+name = "paranoia-enc-cli"
+path = "src/main.rs"
+
+[dependencies]
+paranoia-enc-core = { path = "../core" }
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
