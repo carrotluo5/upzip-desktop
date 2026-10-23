@@ -1,0 +1,95 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            artifact_name: paranoia-decryptor-macos-arm64
+            artifact_paths: |
+              gui/src-tauri/target/release/bundle/macos/*.app
+              gui/src-tauri/target/release/bundle/dmg/*.dmg
+          - name: Windows x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: paranoia-decryptor-windows-x64
+            artifact_paths: |
+              gui/src-tauri/target/release/bundle/nsis/*-setup.exe
+              gui/src-tauri/target/release/paranoia-enc-decryptor.exe
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: gui/pnpm-lock.yaml
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            gui/src-tauri -> target
+
+      - name: cargo test (workspace)
+        run: cargo test --workspace
+
+      - name: CLI smoke test (--help)
+        run: cargo run --release -p paranoia-enc-cli -- --help
+
+      - name: Install GUI dependencies
+        working-directory: gui
+        shell: bash
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            pnpm install --frozen-lockfile
+          else
+            echo '::warning::gui/pnpm-lock.yaml is missing; falling back to non-frozen install'
+            pnpm install --no-frozen-lockfile
+          fi
+
+      - name: "Build GUI (macOS: app + dmg)"
+        if: runner.os == 'macOS'
+        working-directory: gui
+        run: pnpm tauri build
+
+      - name: "Build GUI (Windows: NSIS installer)"
+        if: runner.os == 'Windows'
+        working-directory: gui
+        run: pnpm tauri build --bundles nsis
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_paths }}
+          if-no-files-found: error
+          retention-days: 14

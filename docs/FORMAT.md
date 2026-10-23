@@ -35,6 +35,10 @@ L = 文件总长。样本 L=60527110 / 209779415。无任何额外字段；不�
    HMAC 使用 Skein-1024 块大小 128B，输出 128B。
 3. `argonOut = Argon2id(version=0x13, password=l0PWHash, salt=salt32, t=20, m=20480 KiB, p=4, out=256B)`。
    参数由 customParams 字节编码: `tm = low nibble`, `mm = high nibble`; `t = 10*2^tm`, `m = 10240*2^mm KiB`, `p = 4`（v4 固定）。
+   官方 Java 实现（`Argon2Params.getParametersForFE`）对全部 256 个字节值都接受（极端值如 0xF1 会要求
+   m = 320 GiB，实际运行会 OOM）。本实现出于安全考虑**主动拒绝** `tm > 6` 或 `mm > 6`（即 t > 640
+   或 m > 640 MiB）的极端参数并报 `invalidCustomParams`，避免尝试天文数字的内存分配；这是本实现的
+   安全护栏，不是格式规则。正常软件生成的样本为 `0x11`（t=20, m=20480 KiB）。
 4. 三个子密钥（均为 HKDF-SHA3-512，IKM=argonOut）:
    - encKey32 = HKDF(salt="encKeySalt", info="encKeyInfo")
    - authKey32 = HKDF(salt="authKeySalt", info="authKeyInfo")
@@ -64,7 +68,8 @@ L = 文件总长。样本 L=60527110 / 209779415。无任何额外字段；不�
 2. magic != "SSEFE" => badMagic
 3. version != 4 => unsupportedVersion
 4. algorithm != 0 => unsupportedAlgorithm
-5. customParams 无法解析 => invalidCustomParams
+5. customParams 超出本实现安全上限（tm>6 或 mm>6，见上文） => invalidCustomParams
+   （格式本身允许该字节，官方实现会接受；这是防止 OOM 的实现护栏）
 6. 恢复容器魔数 => unsupportedRecovery
 7. checkcode 非法字符 => wrongPassword
 8. MAC 不匹配 => integrity

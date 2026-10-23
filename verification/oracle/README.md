@@ -1,0 +1,137 @@
+# Independent Java Oracle — Paranoia File Encryption v4 AES-256
+
+An independent, **non-Rust** implementation of the Paranoia File Encryption v4
+(AES-256, password mode) container format, used to cross-check the Rust
+implementation in `crates/` and to validate the two provided `.enc` samples.
+
+Built and run on 2026-10-23. **Verdict: both samples fully verified** —
+BLAKE3 keyed MAC matches, checkcode is valid, inner ZIP CRC matches, decrypted
+plaintext SHA-256 matches the expected values, and the decrypted bytes are
+byte-identical to the original files (`cmp`).
+
+| sample | enc size | MAC | checkcode | ZIP CRC | decrypted SHA-256 | cmp vs original |
+|---|---|---|---|---|---|---|
+| 3138.7z.002.enc | 60,527,110 | OK | OK (32 chars) | OK | `46abe32c…d04ce840` | identical |
+| 3138.7z.001.enc | 209,779,415 | OK | OK (32 chars) | OK | `9d001d6c…f058e40c` | identical |
+
+Wrong password `"456"` → checkcode is not `[a-z0-9]` → rejected as wrong
+password (BLAKE3 MAC also fails, as expected).
+
+See `../../docs/oracle-report.md` for the full verification report (environment,
+exact commands, all key hexes, discrepancies, conclusions).
+
+## Layout
+
+```
+verification/oracle/
+  src/oracle/Oracle.java   independent container/KDF/MAC implementation + CLI
+  build.sh                 compiles Oracle.java using the vendored official sources
+  test.sh                  reproducible end-to-end check (build + both samples + negative test)
+  test-vectors.json        machine-readable test vectors for the Rust test suite
+  .gitignore               ignores build/ (compiled classes)
+```
+
+## Requirements
+
+- **JDK 17+** (verified with Temurin **21.0.13+9**; e.g. `/tmp/jdk21/jdk-21.0.13+9/Contents/Home`).
+  Set `JAVA_HOME` or have it at `/tmp/jdk21/*/Contents/Home`.
+- **Vendored official Java source tree at `/tmp/paranoia-pc`** (read-only; never
+  modified). Override with `PARANOIA_PC=/path/to/paranoia-pc`. Only
+  `CryptoLibs/src` (BouncyCastle subset: Skein/HKDF/SHA3/AES/CTR/BLAKE3) and
+  `at.gadermaier.argon2` are compiled from it.
+- **Samples** at `/Volumes/Carrot/Download`: `3138.7z.001.enc`, `3138.7z.002.enc`
+  plus their decrypted originals `3138.7z.001`, `3138.7z.002` for the `cmp`
+  check. Override with `SAMPLES_DIR=...`. Password: `"123"`. Samples are only
+  ever read.
+
+## Build
+
+```bash
+bash verification/oracle/build.sh
+# JDK     : javac 21.0.13
+# built   : verification/oracle/build/classes
+```
+
+What is **reused** vs **independently written** (important for the cross-check):
+
+| component | source |
+|---|---|
+| Skein-1024, HKDF, SHA3-512, AES, CTR (SICBlockCipher), BLAKE3 primitives | **reused** from vendored official sources (`/tmp/paranoia-pc/CryptoLibs/src`), compiled read-only via `javac -sourcepath` |
+| Argon2id implementation | **reused** from vendored official `at.gadermaier.argon2` |
+| container header layout/validation, KDF wiring (HKDF salts/infos, key sizes, nonce derivation), AES-CTR invocation (nonce-as-initial-counter, big-endian +1), BLAKE3 MAC input ordering, checkcode rule, ZIP extraction + CRC + SHA-256, test-vector emission | **independent reimplementation** in `Oracle.java`, written from `docs/FORMAT.md` and the official Java sources; the Rust implementation was **not** consulted or used |
+
+The oracle therefore validates that the *format understanding* (layout, KDF
+wiring, MAC construction) is correct given the official crypto primitives — it
+is a genuine independent second implementation of the container logic.
+
+## Run (reproducible end-to-end verification)
+
+```bash
+bash verification/oracle/test.sh
+```
+
+This builds, decrypts both samples, runs the wrong-password negative test,
+re-checks SHA-256 + `cmp` against the originals, and rewrites
+`test-vectors.json`. Expected tail: `ALL CHECKS PASSED`.
+
+Manual single-sample run:
+
+```bash
+JAVA_HOME=/tmp/jdk21/jdk-21.0.13+9/Contents/Home
+$JAVA_HOME/bin/java -cp verification/oracle/build/classes oracle.Oracle \
+  --outdir /tmp/oracle-out \
+  --json-out verification/oracle/test-vectors.json \
+  --ctr bc \   # bc = official BouncyCastle SICBlockCipher (default); jce = JDK AES/ECB keystream
+  --sample "3138.7z.002|/Volumes/Carrot/Download/3138.7z.002.enc|123|/Volumes/Carrot/Download/3138.7z.002|46abe32caa76660bc87ef9b52d4699d4129ff4fcd86994ccd80ac365d04ce840"
+```
+
+`--sample` spec: `label|encPath|password|originalPath|expectedSha256` (expect
+success) or `label|encPath|password|||wrongpw` (expect wrong-password).
+Other flags: `--outdir DIR`, `--json-out FILE`, `--ctr bc|jce`,
+`--keep-plaintext`, `--parse-custom-params`.
+
+`--parse-custom-params` prints the official v4 customParams byte mapping
+(`t = 10*2^(b&0xF)`, `m = 10240*2^((b>>4)&0xF) KiB`, `p = 4`). The official
+Java code performs **no range check** — every byte `0x00..0xFF` is structurally
+valid; extreme values (e.g. `0xF1` → m = 320 GiB) merely fail at Argon2
+allocation/runtime. This is documented in the report.
+
+## test-vectors.json
+
+Generated by the run above; intended as fixtures for the Rust test suite.
+Top-level keys: `tool`, `description`, `generatedAt`, `jdk`,
+`vendoredOfficialSource`, `layout`, `ctrEngine`, `samples`, `negativeTests`.
+
+Each `samples.<label>` object contains:
+
+- `headerHex`, `magic`, `formatVersion`, `algorithmByte`, `customParamsByte`, `argon2Params`
+- `saltHex`
+- KDF chain: `l0PWHashV3Hex` (HKDF-Skein-1024 output, 128 B), `argon2OutputHex` (256 B), `encKeyHex` (32 B), `nonceHex` (16 B), `authKeyHex` (32 B)
+- MAC: `storedMacHex`, `computedMacHex`, `macMatch`
+- checkcode: `checkCodeHex`, `checkCodeString`, `checkCodeValid`, `wrongPassword`
+- ZIP: `innerZipSize`, `zipEntries[]` (`name`, `index`, `uncompressedSize`, `declaredSize`, `declaredCompressedSize`, `crc32ActualHex`, `declaredCrcHex`, `crcMatch`, `sha256`), `originalFilename`
+- result: `decryptedFile`, `decryptedSize`, `decryptedSha256`, `expectedSha256`, `sha256Match`, `byteCompareWithOriginal`
+- `plaintextLen`, `encSize`
+
+`negativeTests.<label>` records the wrong-password run
+(`wrongPassword=true`, `checkCodeValid=false`, MAC mismatch).
+
+## Notes / limitations
+
+- **v4 only.** The sample files are format version 4. The oracle also implements
+  the documented v4 header validation (magic/version/algorithm/length), but the
+  official code also supports legacy format versions (e.g. v3, MAC key length
+  64) — those paths are intentionally **not** implemented here and no v3 sample
+  was exercised.
+- Error-ordering checks (too short, bad magic, unsupported version/algorithm)
+  are implemented in the oracle but are **not** exercised on real samples;
+  they would require synthetic corrupt files, which were not part of the
+  required verification. The wrong-password ordering **is** exercised.
+- The PFTEREC1 recovery-extension detection from FORMAT.md is **not**
+  implemented in this oracle (samples contain no recovery trailer).
+- Non-ASCII password normalization is implemented from FORMAT.md but the
+  samples only use ASCII `"123"`, so only that path is verified.
+- `test.sh` rewrites `test-vectors.json` (its `generatedAt` timestamp changes).
+- Numbers measured on a loaded machine; KDF/decrypt timings are indicative only.
+- The vendored official tree `/tmp/paranoia-pc` is used strictly read-only:
+  `javac` reads sources; all class output goes to `verification/oracle/build/`.

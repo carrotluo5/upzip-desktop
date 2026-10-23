@@ -100,9 +100,21 @@ fn batch_decrypts_two_copies_and_isolates_failures() {
     let copy_b = input_dir.join("copy-b.enc");
     fs::copy(&sample, &copy_a).unwrap();
     fs::copy(&sample, &copy_b).unwrap();
-    // A third file with a wrong password must fail without aborting the batch.
+    // A third file that no longer decrypts with this password must fail without
+    // aborting the batch. Flipping one ciphertext byte makes the plaintext
+    // checkcode invalid, so the decryptor reports a wrong-password error.
     let bad = input_dir.join("bad.enc");
     fs::copy(&sample, &bad).unwrap();
+    {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let mut file = fs::OpenOptions::new().read(true).write(true).open(&bad).unwrap();
+        file.seek(SeekFrom::Start(40)).unwrap();
+        let mut byte = [0u8; 1];
+        file.read_exact(&mut byte).unwrap();
+        byte[0] ^= 0xff;
+        file.seek(SeekFrom::Start(40)).unwrap();
+        file.write_all(&byte).unwrap();
+    }
 
     let options = BatchOptions {
         files: vec![copy_a.clone(), bad.clone(), copy_b.clone()],

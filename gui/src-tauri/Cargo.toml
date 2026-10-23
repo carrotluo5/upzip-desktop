@@ -1,0 +1,28 @@
+[package]
+name = "paranoia-enc-decryptor"
+version = "0.1.0"
+edition = "2021"
+description = "Paranoia 文件解密工具（GUI）"
+authors = ["nanase"]
+license = "MIT"
+publish = false
+
+# gui/src-tauri 是独立的 cargo workspace：避免被仓库根 Cargo.toml 的 workspace 收编，
+# 也避免把 GUI 的依赖混进核心库/CLI 的构建。
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+paranoia-enc-core = { path = "../../crates/core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1

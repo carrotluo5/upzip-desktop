@@ -1,0 +1,16 @@
+{
+  "name": "paranoia-enc-decryptor-gui",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Paranoia File Encryption (.enc) 批量解密工具 — Tauri v2 桌面 GUI",
+  "type": "module",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  },
+  "packageManager": "pnpm@11.27.0"
+}
