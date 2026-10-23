@@ -29,7 +29,7 @@ cd paranoia-enc-decryptor
 
 脚本会依次执行：环境检查 → `cargo test --workspace` → `cd gui && pnpm install` → `pnpm tauri build` → 打印产物路径与大小。
 
-> **本机实测**（macOS 27.2 arm64，2026-10-24，v0.1.1）：`./scripts/build.sh` 全流程通过；Rust 测试 35 个 core 单元测试 + 1 个 oracle 向量测试通过（2 个真实样本测试默认 ignored）；GUI release 增量构建 29.80 s；产物 `.app` 5.8 MiB、`.dmg` 4.25 MiB（4,457,433 B）、裸二进制 4,888,448 B。
+> **本机实测**（macOS 27.2 arm64，2026-10-24，v0.1.1）：`./scripts/build.sh` 全流程通过；Rust 测试 35 个 core 单元测试 + 1 个 oracle 向量测试通过（2 个真实样本测试默认 ignored）；GUI release 增量构建 35.37 s（图标重绘后重建）；产物 `.app` 4.78 MiB、`.dmg` 2.19 MiB（2,296,239 B）、裸二进制 4,855,424 B。
 
 ### Windows x64
 
@@ -62,11 +62,11 @@ pnpm tauri build              # macOS: .app + .dmg；Windows: NSIS（建议显�
 
 | 平台 | 产物 | 路径（相对仓库根） |
 |---|---|---|
-| macOS arm64 | 应用包 | `gui/src-tauri/target/release/bundle/macos/Paranoia Decryptor.app`（v0.1.1 本机实测 5.8 MiB） |
-| macOS arm64 | DMG 安装镜像 | `gui/src-tauri/target/release/bundle/dmg/Paranoia Decryptor_<version>_aarch64.dmg`（v0.1.1 本机实测 4,457,433 B / 4.25 MiB） |
-| macOS arm64 | 裸二进制 | `gui/src-tauri/target/release/paranoia-enc-decryptor`（v0.1.1 本机实测 4,888,448 B） |
+| macOS arm64 | 应用包 | `gui/src-tauri/target/release/bundle/macos/Paranoia Decryptor.app`（v0.1.1 本机实测 4.78 MiB） |
+| macOS arm64 | DMG 安装镜像 | `gui/src-tauri/target/release/bundle/dmg/Paranoia Decryptor_<version>_aarch64.dmg`（v0.1.1 本机实测 2,296,239 B / 2.19 MiB） |
+| macOS arm64 | 裸二进制 | `gui/src-tauri/target/release/paranoia-enc-decryptor`（v0.1.1 本机实测 4,855,424 B） |
 | Windows x64 | NSIS 安装包 | `gui\src-tauri\target\release\bundle\nsis\*-setup.exe` |
-| Windows x64 | 裸二进制 / 单文件便携版 | `gui\src-tauri\target\release\paranoia-enc-decryptor.exe`（真机构建）；交叉编译便携版在 `gui/src-tauri/target/x86_64-pc-windows-msvc/release/paranoia-enc-decryptor.exe`（v0.1.1 实测 6,980,096 B） |
+| Windows x64 | 裸二进制 / 单文件便携版 | `gui\src-tauri\target\release\paranoia-enc-decryptor.exe`（真机构建）；交叉编译便携版在 `gui/src-tauri/target/x86_64-pc-windows-msvc/release/paranoia-enc-decryptor.exe`（v0.1.1 实测 6,905,856 B） |
 | 通用 | CLI（验证/脚本用） | `target/release/paranoia-enc-cli`（Windows: `.exe`） |
 
 Tauri 的应用名、标识符与打包目标定义在 `gui/src-tauri/tauri.conf.json`：

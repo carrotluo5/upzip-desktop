@@ -165,7 +165,7 @@ bash verification/oracle/test.sh
 
 ## 6. GUI 验证（macOS arm64）
 
-构建产物（v0.1.1）：`gui/src-tauri/target/release/bundle/macos/Paranoia Decryptor.app`（5.8 MiB，内含 `Contents/MacOS/paranoia-enc-decryptor` 4,888,448 B，Mach-O arm64）。用 `open ./Paranoia Decryptor.app` 启动，进程与窗口正常创建（已实际启动验证后退出）。
+构建产物（v0.1.1）：`gui/src-tauri/target/release/bundle/macos/Paranoia Decryptor.app`（4.78 MiB，内含 `Contents/MacOS/paranoia-enc-decryptor` 4,855,424 B，Mach-O arm64）。用 `open ./Paranoia Decryptor.app` 启动，进程与窗口正常创建（已实际启动验证后退出）。
 
 验证方式：release 二进制内置验收开关 `--autotest-spec <spec.json> --autotest-report <report.json>`，由真实前端代码驱动「添加文件 → 校验 → 开始解密 → 汇总」的完整数据路径，并在隔离配置目录（`PARANOIA_ENC_CONFIG_DIR=/tmp/guiverify2/config`）下运行；输入为样本副本（`sample-a.enc`、`sample-b.enc` 均为 `3138.7z.002.enc` 副本，另有首字节损坏的 `bad-password.enc`、`notes.txt` 与 5 个伪造头文件）。
 
@@ -221,30 +221,31 @@ release 二进制内置 autotest 在批处理期间每 25 ms 采样一次工具�
 - 密码记忆不受影响：新进程启动时 `autoFilled=true`、`passwordLength=3`。
 - 回归：`cargo test --workspace` → 35 个 core 单元测试 + 1 个 oracle 向量测试通过，2 个 real_sample 测试 ignored；`cargo check`（GUI）通过。
 
-### 7.3 新图标
+### 7.3 应用图标（按反馈扁平化重绘）
 
-- 母版 `gui/src-tauri/icons/app-icon.png`（1024×1024，圆角渐变底 + 白色挂锁图形）；由 `pnpm tauri icon` 生成 `.icns`（1,204,513 B）/ `.ico`（63,244 B）/ 各尺寸 PNG。
-- macOS 应用图标、窗口标题栏与页面顶部品牌图标均使用新图标（`gui/src/app-icon.png` 256px，`index.html` 引用）。
-- 新界面截图见 `docs/screenshots/gui-main.png`（v0.1.1）。
+- 首版图标为渐变 + 高光的拟物化挂锁；按用户反馈重绘为**扁平几何风格**：深蓝底（`#0044B8`）+ 浅蓝圆（`#1F80F9`）+ 纯白开口挂锁，**仅三种纯色，无渐变、无高光、无阴影**。
+- 母版以 Pillow 绘制的几何图形确定性生成（4096 画布渲染后 LANCZOS 降采样），按 macOS Big Sur 图标网格（824/1024 内容区）输出 `gui/src-tauri/icons/app-icon.png`；由 `pnpm tauri icon` 生成 `.icns`（157,861 B）/ `.ico`（23,054 B）/ 各尺寸 PNG。
+- macOS 应用图标、窗口标题栏、页面顶部品牌图标与页签 favicon 均使用新图标（`gui/src/app-icon.png` 256px，`index.html` 引用）。
+- 重绘后重新构建了 macOS 产物并复核了 Windows exe 内嵌图标（见 §7.4、§7.5）；新界面截图见 `docs/screenshots/gui-main.png`（v0.1.1）。
 
 ### 7.4 macOS arm64 重新构建（v0.1.1）
 
-- 命令：`cd gui && pnpm tauri build`；release 增量编译 29.80 s。
-- 裸二进制：4,888,448 B，SHA-256 `1af4c8d65239da5a3e49359b8ade61e37ca142243d5f33b196340ba909b6bfe2`，Mach-O arm64。
-- `.app`：5.8 MiB（`du`）；`.dmg`：`Paranoia Decryptor_0.1.1_aarch64.dmg` 4,457,433 B，SHA-256 `1b4fd9ea8c25ff9fa1acf890b4147ebca46175854ff69fb8e23271072d67bb13`。
+- 命令：`cd gui && pnpm tauri build`；release 增量编译 35.37 s（图标重绘后重新构建）。
+- 裸二进制：4,855,424 B，SHA-256 `84cca06c8e7d93808c05d4d07e6aea56d775e8d72f30b8a633f4c1ceda59246d`，Mach-O arm64。
+- `.app`：4.78 MiB（`du`）；`.dmg`：`Paranoia Decryptor_0.1.1_aarch64.dmg` 2,296,239 B（扁平图标使 `.icns` 从 1.2 MB 降到 158 KB，DMG 随之显著变小），SHA-256 `0451ba58858b598292f36a0ee450d08781c2a809d755ab6f4907d7d544b40cdc`。
 - 启动验证：运行 `.app` 内二进制，窗口正常创建；System Events 确认进程 `paranoia-enc-decryptor`；截图确认「就绪 · v0.1.1」、新图标与密码自动填充。
 
 ### 7.5 Windows x64 单文件便携版 exe
 
-- 构建：`./scripts/build-windows-portable.sh`（内部为 `cargo xwin build --release --target x86_64-pc-windows-msvc`，rustup stable）。
-- 产物：`gui/src-tauri/target/x86_64-pc-windows-msvc/release/paranoia-enc-decryptor.exe`，6,980,096 B，SHA-256 `94c617703ee413206920179af6a86ed662c8d71775e09aafabd7c387e4063805`，PE32+ GUI x86-64（Subsystem=2）。
+- 构建：`./scripts/build-windows-portable.sh`（内部为 `cargo xwin build --release --target x86_64-pc-windows-msvc`，rustup stable）。**图标重绘后必须先把 `gui/src-tauri/build.rs` 的 mtime 更新（`touch`）再编译**：`tauri-build` 的构建脚本不会因图标内容变化自动重跑，否则产物内仍嵌旧图标（本次已用 `icon.ico` PNG 负载与 exe 字节比对发现并修正）。
+- 产物：`gui/src-tauri/target/x86_64-pc-windows-msvc/release/paranoia-enc-decryptor.exe`，6,905,856 B，SHA-256 `1f5a4d0bf809a1c6919359d284f4d9915054b717f89a1edd0d538205a79741e8`，PE32+ GUI x86-64（Subsystem=2，`.rsrc` 0x5fd0）；已比对确认内嵌新 `.ico` 的 5 个 PNG 负载。
 - 单文件便携：前端静态资源与 Rust 后端全部内嵌；导入表只有 Windows 系统 DLL + UCRT（无 `VCRUNTIME140.dll`、无 `WebView2Loader.dll`），无需随附 DLL/目录。运行时依赖系统 WebView2 Runtime（Windows 11 自带；Windows 10 通常随 Edge/系统更新安装）。
 - 静态 CRT 尝试失败记录与逐项检查见 `docs/WINDOWS_BUILD.md` §5.4。
 - **诚实边界**：未在真实 Windows 机器/虚拟机上运行（本机无 Windows、无 Wine）；Windows 从零构建与运行验证仍以 `.github/workflows/build.yml` 的 `windows-latest` 任务为准（仓库无 remote，尚未实际执行）。
 
 ### 7.6 交付目录（桌面）
 
-`Paranoia-Decryptor-0.1.1/`：`Paranoia-Decryptor-0.1.1-macos-arm64.dmg`、`Paranoia-Decryptor-0.1.1-windows-x64-portable.exe`、`SHA256SUMS.txt`、`使用说明.txt`。该目录是构建产物的拷贝，不属于 Git 仓库内容。
+`Paranoia-Decryptor-0.1.1/`：`Paranoia-Decryptor-0.1.1-macos-arm64.dmg`（2,296,239 B，SHA-256 `0451ba58…b40cdc`）、`Paranoia-Decryptor-0.1.1-windows-x64-portable.exe`（6,905,856 B，SHA-256 `1f5a4d0b…79741e8`）、`SHA256SUMS.txt`、`使用说明.txt`。该目录是构建产物的拷贝，不属于 Git 仓库内容。
 
 ---
 
@@ -278,7 +279,7 @@ release 二进制内置 autotest 在批处理期间每 25 ms 采样一次工具�
 - 工具链：rustup stable + `cargo-xwin 0.23.1`（MSVC target `x86_64-pc-windows-msvc`）；必须使用 rustup 的 stable 工具链（Homebrew rustc 缺 Windows std，报 E0463）
 - 产物：
   - `paranoia-enc-cli.exe` — 781,312 B
-  - `paranoia-enc-decryptor.exe`（GUI）— v0.1.0 首次为 6,886,912 B；v0.1.1 重新交叉编译后为 6,980,096 B 的**单文件便携版**（见 §7.5）
+  - `paranoia-enc-decryptor.exe`（GUI）— v0.1.0 首次为 6,886,912 B；v0.1.1 重新交叉编译（图标重绘后重编）后为 6,905,856 B 的**单文件便携版**（见 §7.5）
   - 均为 PE32+ x86-64；GUI 子系统 `Subsystem=2`（Windows GUI）
 - **未在 Windows 上执行**，也未用 Wine 模拟运行冒充原生验证（本机未安装 Wine）；无 NSIS 安装包（交叉编译不产出 NSIS）。
 - 结论：Windows x64 的“从零构建并成功运行”证据分为两段——交叉编译证明代码可面向 MSVC x64 构建；原生运行需推送仓库到 GitHub 后由上述 workflow 产出并安装验证。

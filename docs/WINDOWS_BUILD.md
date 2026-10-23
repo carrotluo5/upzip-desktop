@@ -9,7 +9,7 @@
 |---|---|---|
 | Windows x64 **运行时验证**（真实 Windows 上运行 exe / GUI / 解密样本） | ❌ **未进行，也不可能在本机进行** | 本机无 Windows 环境；交叉编译产物**未被执行过**。本文档不伪造任何 Windows 运行结果。 |
 | Windows x64 **CLI/core 构建** | ✅ 交叉编译成功（macOS 上 `cargo-xwin`） | 产出 `paranoia-enc-cli.exe`（PE32+ x86-64，781,312 B），详见 §4 |
-| Windows x64 **GUI（Tauri）单文件便携 exe 构建** | ✅ 交叉编译成功（macOS 上 `cargo-xwin`，**单文件便携 exe，非安装包**） | v0.1.0 首次 6,886,912 B（§5.2）；v0.1.1 重新编译为 6,980,096 B 单文件便携版（§5.4）。**均未在 Windows 上运行过**，Windows 安装包仍走 CI |
+| Windows x64 **GUI（Tauri）单文件便携 exe 构建** | ✅ 交叉编译成功（macOS 上 `cargo-xwin`，**单文件便携 exe，非安装包**） | v0.1.0 首次 6,886,912 B（§5.2）；v0.1.1 重新编译为 6,905,856 B 单文件便携版（§5.4）。**均未在 Windows 上运行过**，Windows 安装包仍走 CI |
 | Windows x64 **从零构建的权威路径** | ✅ GitHub Actions `windows-latest`（`build.yml`） | 见 §6；CI 在真实 Windows runner 上执行 `cargo test` + `pnpm tauri build --bundles nsis` |
 
 **一句话**：本机能证明的是「CLI 与 GUI 的 Rust 侧代码和依赖都可以交叉编译成 Windows x64 可执行文件」，**不能**证明「它们在 Windows 上能运行、能解密、GUI 窗口能打开、安装包能安装」。后者必须依赖 CI 构建 + 真机验收（§7 提供清单）。
@@ -254,19 +254,21 @@ export PATH="$HOME/.cargo/bin:$PATH"
 export RUSTUP_TOOLCHAIN=stable
 unset RUSTFLAGS
 cargo xwin build --release --target x86_64-pc-windows-msvc
-# Finished `release` profile [optimized] target(s) in 47.27s（首次全量；增量 0.46s）
+# Finished `release` profile [optimized] target(s) in 47.27s（首次全量）；图标重绘后重新编译 48.69s（需先 touch build.rs，见下）
 ```
 
 产物与检查：
 
 ```text
 gui/src-tauri/target/x86_64-pc-windows-msvc/release/paranoia-enc-decryptor.exe
-  6,980,096 B
-  sha256 94c617703ee413206920179af6a86ed662c8d71775e09aafabd7c387e4063805
+  6,905,856 B
+  sha256 1f5a4d0bf809a1c6919359d284f4d9915054b717f89a1edd0d538205a79741e8
   file: PE32+ executable (GUI) x86-64, for MS Windows
-  PE Subsystem: 00000002 (Windows GUI)；.rsrc 0xfcc0（图标/清单已嵌入）
+  PE Subsystem: 00000002 (Windows GUI)；.rsrc 0x5fd0（图标/清单已嵌入）
   版本资源（UTF-16 扫描）：含 "0.1.1" 与 "Paranoia Decryptor"
 ```
+
+> **图标重绘后的重编（交付版数值）**：`tauri-build` 的构建脚本不会因为图标文件内容变化自动重跑，直接 `cargo xwin build` 会保留旧图标。必须先 `touch gui/src-tauri/build.rs` 强制重跑构建脚本再编译；上表数值（6,905,856 B / `.rsrc` 0x5fd0）即该次重编结果，并已用脚本比对确认 exe 内嵌的是新 `.ico` 的 PNG 负载（24/32/48/64/256）。
 
 导入表（`llvm-objdump -p`）：`kernel32/user32/gdi32/shell32/shlwapi/ole32/oleaut32/combase/comctl32/dwmapi/imm32/advapi32/ntdll/bcryptprimitives` + `api-ms-win-crt-*`（UCRT）等系统 DLL；**没有** `VCRUNTIME140.dll`、**没有** `WebView2Loader.dll`。
 

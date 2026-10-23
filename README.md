@@ -37,7 +37,7 @@ Paranoia Enc Decryptor 是 [Paranoia File Encryption](https://github.com/apronus
 
 | 维度 | Tauri v2（本项目） | Electron |
 |---|---|---|
-| 安装包体积 | 约 2–10 MB（本项目实测 DMG 4.25 MiB / `.app` 5.8 MiB，不含系统 WebView） | 通常 80–150 MB（自带 Chromium + Node.js） |
+| 安装包体积 | 约 2–10 MB（本项目实测 DMG 2.19 MiB / `.app` 4.78 MiB，不含系统 WebView） | 通常 80–150 MB（自带 Chromium + Node.js） |
 | 冷启动 | 通常 < 1 s（Rust 进程 + 系统 WebView；本机实测见 docs/VERIFICATION.md） | 通常 1–3 s（加载 Chromium/Node 运行时） |
 | Apple Silicon | 原生 arm64 二进制，无 Rosetta | 需分发 arm64 版本；Electron 本体仍较重 |
 | 内存占用 | 与页面复杂度同阶，无独立 JS 运行时进程树 | 主进程 + GPU + 多个渲染进程 |
@@ -136,7 +136,7 @@ cd gui && pnpm install && pnpm tauri build
 - `gui/src-tauri/target/release/bundle/dmg/Paranoia Decryptor_0.1.1_aarch64.dmg`（安装镜像，文件名随版本/架构变化）
 - `gui/src-tauri/target/release/paranoia-enc-decryptor`（裸二进制，便于直接运行）
 
-本机实测（2026-10-24，macOS 27.2 arm64，v0.1.1）：GUI release 增量构建 29.80 s；`.app` 5.8 MiB、`.dmg` 4.25 MiB（4,457,433 B）、裸二进制 4,888,448 B。测试 35 个 core 单元测试 + 1 个 oracle 向量测试通过，2 个真实样本测试默认 ignored；完整构建与验证记录见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。
+本机实测（2026-10-24，macOS 27.2 arm64，v0.1.1）：GUI release 增量构建 35.37 s（图标重绘后重建）；`.app` 4.78 MiB、`.dmg` 2.19 MiB（2,296,239 B）、裸二进制 4,855,424 B。测试 35 个 core 单元测试 + 1 个 oracle 向量测试通过，2 个真实样本测试默认 ignored；完整构建与验证记录见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。
 
 首次打开未签名应用时，macOS Gatekeeper 可能拦截：右键 App →「打开」，或 `System Settings → Privacy & Security → Open Anyway`。
 
@@ -155,10 +155,10 @@ pnpm tauri build
 
 产物：`gui\src-tauri\target\release\bundle\nsis\*-setup.exe`（NSIS 安装包，可用 `pnpm tauri build --bundles nsis` 只构建安装包）与 `gui\src-tauri\target\release\paranoia-enc-decryptor.exe`。未签名安装包会触发 SmartScreen 提示，需「更多信息 → 仍要运行」。
 
-**便携版单文件 exe（可选）**：在 macOS 上可用 `./scripts/build-windows-portable.sh`（底层为 `cargo-xwin`）交叉编译出**单文件**便携版 `paranoia-enc-decryptor.exe`（v0.1.1 实测 6,980,096 B，PE32+ x86-64 / Windows GUI 子系统）。Rust 后端与静态前端资源全部打进一个 exe，**不需要随附 DLL、目录或安装程序**；运行时仅依赖 Windows 系统组件：UCRT（Windows 10+ 自带）与 **WebView2 Runtime**（Windows 11 自带，Windows 10 通常随 Edge/系统更新安装；缺失时从微软官网安装 Evergreen Runtime）。导入表中没有 `VCRUNTIME140.dll`、也没有 `WebView2Loader.dll`。注意：这是**交叉编译**产物，未在真实 Windows 上运行过（见下方诚实说明）。
+**便携版单文件 exe（可选）**：在 macOS 上可用 `./scripts/build-windows-portable.sh`（底层为 `cargo-xwin`）交叉编译出**单文件**便携版 `paranoia-enc-decryptor.exe`（v0.1.1 实测 6,905,856 B，PE32+ x86-64 / Windows GUI 子系统）。Rust 后端与静态前端资源全部打进一个 exe，**不需要随附 DLL、目录或安装程序**；运行时仅依赖 Windows 系统组件：UCRT（Windows 10+ 自带）与 **WebView2 Runtime**（Windows 11 自带，Windows 10 通常随 Edge/系统更新安装；缺失时从微软官网安装 Evergreen Runtime）。导入表中没有 `VCRUNTIME140.dll`、也没有 `WebView2Loader.dll`。注意：这是**交叉编译**产物，未在真实 Windows 上运行过（见下方诚实说明）。
 
 > **诚实说明**：本仓库开发机为 macOS arm64，Windows 运行时行为**未在真实 Windows 机器上验证**（无 Windows PC/VM，也未用 Wine 运行）。
-> Windows 侧证据：(1) `.github/workflows/build.yml` 的 `windows-latest` 任务（权威构建路径；仓库当前无 remote，尚未实际跑过）；(2) 本机 `cargo-xwin` 交叉编译成功的裸产物——CLI `paranoia-enc-cli.exe`（781,312 B）与 GUI 单文件便携版 `paranoia-enc-decryptor.exe`（v0.1.1：6,980,096 B，PE32+ / Subsystem GUI），但**均未在 Windows 上执行**，也未生成 NSIS 安装包。逐条命令、版本与错误见 **[docs/WINDOWS_BUILD.md](docs/WINDOWS_BUILD.md)**。
+> Windows 侧证据：(1) `.github/workflows/build.yml` 的 `windows-latest` 任务（权威构建路径；仓库当前无 remote，尚未实际跑过）；(2) 本机 `cargo-xwin` 交叉编译成功的裸产物——CLI `paranoia-enc-cli.exe`（781,312 B）与 GUI 单文件便携版 `paranoia-enc-decryptor.exe`（v0.1.1：6,905,856 B，PE32+ / Subsystem GUI），但**均未在 Windows 上执行**，也未生成 NSIS 安装包。逐条命令、版本与错误见 **[docs/WINDOWS_BUILD.md](docs/WINDOWS_BUILD.md)**。
 
 ### 开发模式
 
@@ -363,7 +363,7 @@ paranoia-enc-decryptor/
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
-| `0.1.1` | 2026-10-24 | 修复批量解密过程中个别文件行会**短暂误显示「失败」**、随后又变为「成功」的进度事件时序问题（根因：core 在文件最后一块数据回调时携带的仍是上一轮成功/失败计数，GUI 由该回调推导的临时结果被误判为失败；现在仅在实际计数变化时才发出临时结果事件）；新增应用图标（macOS `.icns` / Windows `.ico`）；提供 Windows 单文件便携版 exe 的交叉构建脚本；重新构建 macOS arm64 DMG。 |
+| `0.1.1` | 2026-10-24 | 修复批量解密过程中个别文件行会**短暂误显示「失败」**、随后又变为「成功」的进度事件时序问题（根因：core 在文件最后一块数据回调时携带的仍是上一轮成功/失败计数，GUI 由该回调推导的临时结果被误判为失败；现在仅在实际计数变化时才发出临时结果事件）；新增扁平化应用图标（纯色几何风格，无渐变/高光；macOS `.icns` / Windows `.ico`）；提供 Windows 单文件便携版 exe 的交叉构建脚本；重新构建 macOS arm64 DMG。 |
 | `0.1.0` | 2026-10-23 | 首个版本：Paranoia v4 / AES-256 `.enc` 解密核心、CLI、Tauri GUI、独立 Java oracle 与完整验证文档。 |
 
 ## 许可证
