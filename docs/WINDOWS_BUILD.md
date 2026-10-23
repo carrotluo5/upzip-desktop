@@ -1,6 +1,6 @@
 # Windows x64 构建与验证记录（WINDOWS_BUILD）
 
-> 记录日期：2026-10-23（Asia/Shanghai）
+> 记录日期：2026-10-23（Asia/Shanghai）；2026-10-24 增补 v0.1.1 单文件便携版交叉编译记录（§5.4）。
 > 记录机器：macOS arm64（Apple Silicon），**没有 Windows 机器、没有 Windows 虚拟机、没有 Wine**。
 
 ## 0. 结论摘要（先看这里）
@@ -9,7 +9,7 @@
 |---|---|---|
 | Windows x64 **运行时验证**（真实 Windows 上运行 exe / GUI / 解密样本） | ❌ **未进行，也不可能在本机进行** | 本机无 Windows 环境；交叉编译产物**未被执行过**。本文档不伪造任何 Windows 运行结果。 |
 | Windows x64 **CLI/core 构建** | ✅ 交叉编译成功（macOS 上 `cargo-xwin`） | 产出 `paranoia-enc-cli.exe`（PE32+ x86-64，781,312 B），详见 §4 |
-| Windows x64 **GUI（Tauri）裸 exe 构建** | ✅ 交叉编译成功（macOS 上 `cargo-xwin`，**仅裸 exe，非安装包**） | 产出 6,886,912 B 的 PE32+ GUI exe（EXIT=0），详见 §5；**该 exe 未在 Windows 上运行过**，Windows 安装包仍走 CI |
+| Windows x64 **GUI（Tauri）单文件便携 exe 构建** | ✅ 交叉编译成功（macOS 上 `cargo-xwin`，**单文件便携 exe，非安装包**） | v0.1.0 首次 6,886,912 B（§5.2）；v0.1.1 重新编译为 6,980,096 B 单文件便携版（§5.4）。**均未在 Windows 上运行过**，Windows 安装包仍走 CI |
 | Windows x64 **从零构建的权威路径** | ✅ GitHub Actions `windows-latest`（`build.yml`） | 见 §6；CI 在真实 Windows runner 上执行 `cargo test` + `pnpm tauri build --bundles nsis` |
 
 **一句话**：本机能证明的是「CLI 与 GUI 的 Rust 侧代码和依赖都可以交叉编译成 Windows x64 可执行文件」，**不能**证明「它们在 Windows 上能运行、能解密、GUI 窗口能打开、安装包能安装」。后者必须依赖 CI 构建 + 真机验收（§7 提供清单）。
@@ -169,6 +169,8 @@ cargo xwin build --release --target x86_64-pc-windows-msvc
 
 实测：**成功（EXIT=0）**。
 
+> 注：本节为 v0.1.0 的首次交叉编译记录（6,886,912 B）；v0.1.1 的重新编译与单文件便携版见 §5.4。
+
 ```text
 cd gui/src-tauri
 cargo xwin build --release --target x86_64-pc-windows-msvc
@@ -217,6 +219,67 @@ warning: `paranoia-enc-decryptor` (bin "paranoia-enc-decryptor") generated 1 war
 - Windows 安装包**只能**在 Windows 上构建（CI `windows-latest` 或真机）；
 - 本机 `cargo xwin` 只用于回答「GUI 的 Rust 依赖树能否在 Windows target 下编译」这一构建层面的问题。
 
+### 5.4 v0.1.1 单文件便携版 exe（2026-10-24 增补）
+
+目标：交付一个 Windows 上「双击即用」的单文件便携版，不依赖随附 DLL 或资源目录。
+
+#### 尝试 A：静态 CRT（失败，已放弃）
+
+```bash
+cd gui/src-tauri
+export PATH="$HOME/.cargo/bin:$PATH"
+export RUSTUP_TOOLCHAIN=stable
+export RUSTFLAGS="-C target-feature=+crt-static"
+cargo xwin build --release --target x86_64-pc-windows-msvc
+```
+
+链接阶段失败，典型错误（节选）：
+
+```text
+ld.lld: error: undefined symbol: _seh_filter_dll
+ld.lld: error: undefined symbol: _configure_narrow_argv
+ld.lld: error: undefined symbol: _initialize_narrow_environment
+ld.lld: error: undefined symbol: _initialize_onexit_table
+ld.lld: error: undefined symbol: _register_onexit_function
+>>> referenced by libwebview2_com_sys-*.rlib(loader_override.obj)
+```
+
+原因：Tauri 2 的 `webview2-com` 在 Windows 上静态链接了 WebView2 loader override，它与静态 CRT 的启动/异常处理符号不兼容；在 `cargo-xwin` 场景下没有低成本修补方式。结论：**放弃静态 CRT，改用默认动态 CRT**。
+
+#### 尝试 B：默认动态 CRT（成功，作为交付方式）
+
+```bash
+cd gui/src-tauri
+export PATH="$HOME/.cargo/bin:$PATH"
+export RUSTUP_TOOLCHAIN=stable
+unset RUSTFLAGS
+cargo xwin build --release --target x86_64-pc-windows-msvc
+# Finished `release` profile [optimized] target(s) in 47.27s（首次全量；增量 0.46s）
+```
+
+产物与检查：
+
+```text
+gui/src-tauri/target/x86_64-pc-windows-msvc/release/paranoia-enc-decryptor.exe
+  6,980,096 B
+  sha256 94c617703ee413206920179af6a86ed662c8d71775e09aafabd7c387e4063805
+  file: PE32+ executable (GUI) x86-64, for MS Windows
+  PE Subsystem: 00000002 (Windows GUI)；.rsrc 0xfcc0（图标/清单已嵌入）
+  版本资源（UTF-16 扫描）：含 "0.1.1" 与 "Paranoia Decryptor"
+```
+
+导入表（`llvm-objdump -p`）：`kernel32/user32/gdi32/shell32/shlwapi/ole32/oleaut32/combase/comctl32/dwmapi/imm32/advapi32/ntdll/bcryptprimitives` + `api-ms-win-crt-*`（UCRT）等系统 DLL；**没有** `VCRUNTIME140.dll`、**没有** `WebView2Loader.dll`。
+
+「便携」的准确含义：
+
+- exe 是**单文件**：Tauri 的静态前端资源（HTML/CSS/JS）与 Rust 后端都在 exe 内，复制到 Windows 即可运行，不需要安装程序或随附目录；
+- 运行时依赖系统组件：Windows 10+ 自带 UCRT；界面需要系统 **WebView2 Runtime**（Windows 11 内置，Windows 10 通常随 Edge/系统更新安装）；
+- 链接告警 `LNK4099 … libcmt.amd64.pdb` 是 cargo-xwin 提供的 CRT 不带 PDB 调试信息所致，不影响产物（最终 EXIT=0）。
+
+一键复现：`./scripts/build-windows-portable.sh`（macOS；内部检查 rustup stable / cargo-xwin / Windows target，并打印路径、大小与 SHA-256）。
+
+**诚实边界**：该 exe 仍未在真实 Windows 上运行过（本机无 Windows/VM/Wine）；「双击即用」与解密结果需真机验收（§7 清单）。
+
 ## 6. CI：Windows 从零构建的权威路径
 
 `.github/workflows/build.yml`（与 macOS 同一份 workflow，矩阵构建）：
@@ -245,7 +308,7 @@ certutil -hashfile %TEMP%\out\3138.7z.002 SHA256
 # 预期: 46abe32caa76660bc87ef9b52d4699d4129ff4fcd86994ccd80ac365d04ce840
 
 # 4. GUI 手工验收
-#    - 双击 bundle\nsis\*-setup.exe 安装（SmartScreen 需「更多信息 -> 仍要运行」）
+#    - 双击 bundle\nsis\*-setup.exe 安装（SmartScreen 需「更多信息 -> 仍要运行」）；或直接运行单文件便携版 exe（§5.4，无需安装）
 #    - 打开「Paranoia 解密工具」：拖放 .enc、多选添加、输入密码 123、默认输出到首文件目录
 #    - 观察逐文件/整体进度、错误提示、冲突策略（rename/overwrite/error）
 #    - 勾选「记住密码」后重启，确认自动填充；点「清除记忆」后重启确认不再填充

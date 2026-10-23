@@ -1,6 +1,6 @@
 [package]
 name = "paranoia-enc-decryptor"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Paranoia 文件解密工具（GUI）"
 authors = ["nanase"]

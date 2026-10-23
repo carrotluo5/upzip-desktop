@@ -29,7 +29,7 @@ cd paranoia-enc-decryptor
 
 脚本会依次执行：环境检查 → `cargo test --workspace` → `cd gui && pnpm install` → `pnpm tauri build` → 打印产物路径与大小。
 
-> **本机实测**（macOS 27.2 arm64，2026-10-23）：`./scripts/build.sh` 全流程通过；Rust 测试 35 个 core 单元测试 + 1 个 oracle 向量测试通过（2 个真实样本测试默认 ignored）；GUI 增量构建 41.37 s；产物 `.app` 4.74 MiB、`.dmg` 2.04 MiB、裸二进制 4,838,912 B。
+> **本机实测**（macOS 27.2 arm64，2026-10-24，v0.1.1）：`./scripts/build.sh` 全流程通过；Rust 测试 35 个 core 单元测试 + 1 个 oracle 向量测试通过（2 个真实样本测试默认 ignored）；GUI release 增量构建 29.80 s；产物 `.app` 5.8 MiB、`.dmg` 4.25 MiB（4,457,433 B）、裸二进制 4,888,448 B。
 
 ### Windows x64
 
@@ -37,6 +37,12 @@ cd paranoia-enc-decryptor
 git clone <repo-url> paranoia-enc-decryptor
 cd paranoia-enc-decryptor
 powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
+```
+
+在 macOS 上交叉编译 Windows 单文件便携版（实验性，需 `cargo-xwin`，见 §8）：
+
+```bash
+./scripts/build-windows-portable.sh
 ```
 
 ### 手动等价命令
@@ -56,11 +62,11 @@ pnpm tauri build              # macOS: .app + .dmg；Windows: NSIS（建议显�
 
 | 平台 | 产物 | 路径（相对仓库根） |
 |---|---|---|
-| macOS arm64 | 应用包 | `gui/src-tauri/target/release/bundle/macos/Paranoia Decryptor.app`（本机实测 4.74 MiB） |
-| macOS arm64 | DMG 安装镜像 | `gui/src-tauri/target/release/bundle/dmg/Paranoia Decryptor_<version>_aarch64.dmg`（本机实测 2.04 MiB） |
-| macOS arm64 | 裸二进制 | `gui/src-tauri/target/release/paranoia-enc-decryptor`（本机实测 4,838,912 B） |
+| macOS arm64 | 应用包 | `gui/src-tauri/target/release/bundle/macos/Paranoia Decryptor.app`（v0.1.1 本机实测 5.8 MiB） |
+| macOS arm64 | DMG 安装镜像 | `gui/src-tauri/target/release/bundle/dmg/Paranoia Decryptor_<version>_aarch64.dmg`（v0.1.1 本机实测 4,457,433 B / 4.25 MiB） |
+| macOS arm64 | 裸二进制 | `gui/src-tauri/target/release/paranoia-enc-decryptor`（v0.1.1 本机实测 4,888,448 B） |
 | Windows x64 | NSIS 安装包 | `gui\src-tauri\target\release\bundle\nsis\*-setup.exe` |
-| Windows x64 | 裸二进制 | `gui\src-tauri\target\release\paranoia-enc-decryptor.exe` |
+| Windows x64 | 裸二进制 / 单文件便携版 | `gui\src-tauri\target\release\paranoia-enc-decryptor.exe`（真机构建）；交叉编译便携版在 `gui/src-tauri/target/x86_64-pc-windows-msvc/release/paranoia-enc-decryptor.exe`（v0.1.1 实测 6,980,096 B） |
 | 通用 | CLI（验证/脚本用） | `target/release/paranoia-enc-cli`（Windows: `.exe`） |
 
 Tauri 的应用名、标识符与打包目标定义在 `gui/src-tauri/tauri.conf.json`：
@@ -117,19 +123,24 @@ CI 是 Windows 侧**真实构建验证**的权威路径；本仓库开发机为 
 
 ## 8. Windows 交叉编译（可选，实验性）
 
-在 macOS 上可用 `cargo-xwin` 交叉编译到 `x86_64-pc-windows-msvc`：CLI/core 与 Tauri GUI 裸 exe 均已实测成功（GUI 需先 `cd gui/src-tauri`），但**不能生成 NSIS 安装包**、也不能在 macOS 上验证 Windows 运行时。完整命令、版本与错误记录见 **[WINDOWS_BUILD.md](WINDOWS_BUILD.md)**。
+在 macOS 上可用 `cargo-xwin` 交叉编译到 `x86_64-pc-windows-msvc`：CLI/core 与 Tauri GUI **单文件便携 exe** 均已实测成功，但**不能生成 NSIS 安装包**、也不能在 macOS 上验证 Windows 运行时。完整命令、版本、静态 CRT 失败记录与产物检查见 **[WINDOWS_BUILD.md](WINDOWS_BUILD.md)**。
 
 ```bash
-# 前置：brew install llvm && cargo install cargo-xwin && rustup target add x86_64-pc-windows-msvc
+# 前置：brew install llvm && cargo install cargo-xwin
+#       rustup target add --toolchain stable x86_64-pc-windows-msvc
 export PATH="$HOME/.cargo/bin:$PATH"   # 确保用 rustup 的 cargo/rustc
 RUSTUP_TOOLCHAIN=stable cargo xwin build --release -p paranoia-enc-cli --target x86_64-pc-windows-msvc
+
+# GUI 单文件便携版（等价于脚本 build-windows-portable.sh）
+cd gui/src-tauri
+RUSTUP_TOOLCHAIN=stable cargo xwin build --release --target x86_64-pc-windows-msvc
 ```
 
 ## 9. 版本记录
 
 | 组件 | 版本 |
 |---|---|
-| 项目 | 0.1.0（Phase 1） |
+| 项目 | 0.1.1（Phase 1） |
 | Rust edition | 2021 |
 | Tauri | v2（CLI 2.12.4） |
 | 验证环境 | macOS arm64（Apple Silicon），rustc 1.99.0 / 1.98.1，node 26.10.0，pnpm 11.27.0 |

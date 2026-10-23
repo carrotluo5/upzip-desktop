@@ -124,6 +124,7 @@ struct BatchEmitter {
     emitted_once: bool,
     last_finished_index: Option<usize>,
     successes_seen: usize,
+    failures_seen: usize,
 }
 
 impl BatchEmitter {
@@ -134,6 +135,7 @@ impl BatchEmitter {
             emitted_once: false,
             last_finished_index: None,
             successes_seen: 0,
+            failures_seen: 0,
         }
     }
 
@@ -147,11 +149,18 @@ impl BatchEmitter {
 
     fn on_progress(&mut self, progress: BatchProgress) {
         // 每个文件结束时立刻发一次 file-finished（此时只知道成功/失败，输出细节由 batch-finished 汇总补齐）。
+        //
+        // 注意：core 在"最后一个分块已处理完、但结果尚未统计"时也会发一次 file_process == file_total
+        // 的进度事件。此时 successes/failures 还是旧值，若据此判定 ok 会把成功的文件瞬时报成失败
+        // （用户看到的"闪一下失败"）。因此只有成功/失败计数真的变化时才发 file-finished 事件。
         let file_done = progress.file_total > 0 && progress.file_processed >= progress.file_total;
-        if file_done && self.last_finished_index != Some(progress.index) {
+        let counters_changed =
+            progress.successes > self.successes_seen || progress.failures > self.failures_seen;
+        if file_done && counters_changed && self.last_finished_index != Some(progress.index) {
             self.last_finished_index = Some(progress.index);
             let ok = progress.successes > self.successes_seen;
             self.successes_seen = progress.successes;
+            self.failures_seen = progress.failures;
             self.emit(
                 EVENT_FILE_FINISHED,
                 &FileFinishedPayload::provisional(&progress.current_file, ok),

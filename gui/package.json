@@ -1,7 +1,7 @@
 {
   "name": "paranoia-enc-decryptor-gui",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Paranoia File Encryption (.enc) 批量解密工具 — Tauri v2 桌面 GUI",
   "type": "module",
   "scripts": {

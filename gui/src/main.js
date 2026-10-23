@@ -504,7 +504,15 @@
 
   function onFileFinished(payload) {
     if (!payload) return;
-    if (state.auto) state.auto.fileFinishedCount += 1;
+    if (state.auto) {
+      state.auto.fileFinishedCount += 1;
+      state.auto.fileFinishedEvents.push({
+        ok: !!payload.ok,
+        input: payload.input ? basename(payload.input) : null,
+        outputs: Array.isArray(payload.outputs) ? payload.outputs.length : 0,
+        errorKind: payload.errorKind || null
+      });
+    }
     const row = rowForInput(payload.input);
     if (!row) return;
     if (!payload.ok) {
@@ -882,7 +890,8 @@
   async function runAutotest(spec, reportPath) {
     const auto = {
       spec, reportPath, startedAt: Date.now(), progressCount: 0, fileFinishedCount: 0,
-      lastProgress: null, resolveBatchDone: null, finished: false, timer: 0
+      lastProgress: null, resolveBatchDone: null, finished: false, timer: 0,
+      fileFinishedEvents: [], samples: [], sampler: 0
     };
     state.auto = auto;
     window.__PARANOIA_AUTOTEST__ = { spec, reportPath };
@@ -1043,6 +1052,24 @@
         return;
       }
 
+      // 记录行状态时间线，用于证明"成功文件不会瞬时显示失败"（仅自动验证时启用）
+      const sampleRows = () => state.rowRefs.map((row) => (row.status ? row.status.textContent : ''));
+      let lastSampleKey = '';
+      auto.samples = [];
+      auto.sampler = setInterval(() => {
+        const sample = {
+          t: Date.now() - auto.startedAt,
+          statOk: els.statOk ? els.statOk.textContent : null,
+          statFail: els.statFail ? els.statFail.textContent : null,
+          rows: sampleRows()
+        };
+        const key = JSON.stringify([sample.statOk, sample.statFail, sample.rows]);
+        if (key !== lastSampleKey) {
+          lastSampleKey = key;
+          auto.samples.push(sample);
+        }
+      }, 25);
+
       const done = new Promise((resolve) => { auto.resolveBatchDone = resolve; });
       els.btnStart.click();
 
@@ -1058,6 +1085,7 @@
 
       await done;
       clearTimeout(auto.timer);
+      if (auto.sampler) clearInterval(auto.sampler);
       await sleep(150);
 
       report.summary = state.lastSummary;
@@ -1066,6 +1094,27 @@
       report.lastProgress = auto.lastProgress;
       report.addValidations = auto.addValidations || [];
       report.rows = collectRows();
+
+      // 时间线分析：成功文件在解密过程中是否出现过"失败"字样（回归验证"闪一下失败"的 bug）
+      const finalRows = report.rows;
+      const finalStatus = finalRows.map((row) => (row.status ? String(row.status) : ''));
+      let transientFailOnSuccess = 0;
+      const transientDetails = [];
+      auto.samples.forEach((sample) => {
+        (sample.rows || []).forEach((text, i) => {
+          if (text && String(text).includes('失败') && (finalStatus[i] || '').includes('成功')) {
+            transientFailOnSuccess += 1;
+            if (transientDetails.length < 12) transientDetails.push({ t: sample.t, row: i, text });
+          }
+        });
+      });
+      report.eventTimeline = {
+        fileFinishedEvents: auto.fileFinishedEvents,
+        sampleCount: auto.samples.length,
+        transientFailOnSuccess,
+        transientDetails,
+        samples: auto.samples.slice(-120)
+      };
       report.dom = collectDom();
       await finishAutotest(report);
     } catch (err) {

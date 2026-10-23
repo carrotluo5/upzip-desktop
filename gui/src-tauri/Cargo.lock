@@ -2319,7 +2319,7 @@ dependencies = [
 
 [[package]]
 name = "paranoia-enc-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes",
  "argon2",
@@ -2337,7 +2337,7 @@ dependencies = [
 
 [[package]]
 name = "paranoia-enc-decryptor"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "paranoia-enc-core",
  "serde",
