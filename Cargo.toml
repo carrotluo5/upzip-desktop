@@ -1,25 +1,40 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/cli"]
+members = ["crates/core", "crates/unpack-core", "crates/cli", "gui/src-tauri"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
-repository = "https://example.invalid/paranoia-enc-decryptor"
+repository = "https://example.invalid/unparanoia"
 
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync", "fs", "io-util", "time", "signal"] }
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+hex = "0.4"
+regex = "1"
+dirs = "6"
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"
+unparanoia-core = { path = "crates/core" }
+unparanoia-unpack-core = { path = "crates/unpack-core" }
+
+# Release profile shared by the CLI and the GUI app.
+# NOTE: the previous paranoia build used opt-level="s" + panic="abort"; the merged
+# build uses upzip's size/speed profile and unwinds so the GUI can catch panics in
+# batch worker threads (see docs/DEV-CONTRACT.md "build profile changes").
 [profile.release]
-lto = true
 codegen-units = 1
-strip = true
-opt-level = "s"
-panic = "abort"
-
-[profile.release.package.paranoia-enc-core]
+lto = true
 opt-level = 3
+strip = true
 
-# Keep the heavy crypto crates optimized even in dev/test builds, otherwise Argon2id
-# (20 iterations, 20 MiB) makes the test suite unnecessarily slow.
+# Keep the heavy crypto crates optimized even in dev/test builds, otherwise
+# Argon2id (20 iterations, 20 MiB) makes the test suite unnecessarily slow.
 [profile.dev.package.argon2]
 opt-level = 3
 

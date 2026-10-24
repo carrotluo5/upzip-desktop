@@ -1,36 +1,23 @@
-# 验证报告（Verification Report）
+# 验证（VERIFICATION）
 
-本文件记录 `paranoia-enc-decryptor` 首期交付（AES-256 `.enc` 解密）的验收证据：测试结果、真实样本哈希、批量与异常路径验证、独立 Java Oracle 交叉验证、macOS arm64 构建与 Windows 构建证据。v0.1.1 的修复与重新构建记录见 §7。
-
-> 样本文件与明文输出**不入库**。本报告中的哈希均由开发机现场计算，任何人可用同样的样本与命令复现。
-
----
+> 结论先行：**本机可复现的自动测试（cargo test --workspace）+ CLI e2e（75 项）全绿；
+> 真实 Paranoia 样本的 MAC/checkcode/CRC/明文一致性属于"历史外部验证"**——
+> 它在 2026-10-23 用独立 Java Oracle 跑过并通过，但当前机器无法重跑
+> （缺少 Oracle 前置与原始明文文件）。本文严格区分「本机已验证」「历史记录」
+> 和「断言但未验证」，不把三者混为一谈。v0.3.0 新增的密码库/逐层重试由
+> CLI e2e 与本机单测覆盖；主题与密码管理页的 GUI 交互仍属"仅人工冒烟"。
 
 ## 1. 环境
 
-| 项目 | 值 |
-| --- | --- |
-| 主机 | macOS 27.2（Darwin arm64，Apple Silicon） |
-| CPU 架构 | arm64（原生，非 Rosetta） |
-| Rust | rustc 1.99.0（Homebrew）、cargo 1.99.0 |
-| Node / pnpm | Node v26.10.0 / pnpm 11.27.0 |
-| Xcode CLT | Command Line Tools（clang 21） |
-| Tauri CLI | @tauri-apps/cli 2.x（见 `gui/package.json`） |
-| 独立校验 JDK | Temurin 21.0.13+9（仅用于 Java Oracle，非交付依赖） |
-| 样本 | `3138.7z.001.enc`（209,779,415 B）、`3138.7z.002.enc`（60,527,110 B），密码均为 `123` |
+| 项 | 值 |
+|---|---|
+| 主机 | macOS 27.2 arm64 |
+| Rust | rustc 1.99.0 / cargo 1.99.0 |
+| Node / pnpm | v26.10.0 / 11.27.0 |
+| 7-Zip | 随仓库 `binaries/mac/7zz` 25.01（2025-08-03），SHA-256 见 binaries/README.md |
+| Java Oracle（历史） | Temurin JDK 21.0.13+9，官方 Paranoia 源码树位于 `/tmp/paranoia-pc`（**当前不存在**） |
 
-原始样本只读，未修改；下表中的 `.enc` SHA-256 是**加密文件本身**的哈希，用于证明样本未被改动。
-
-| 样本 | `.enc` SHA-256（加密文件） | 解密后明文 SHA-256 | 明文大小 |
-| --- | --- | --- | --- |
-| `3138.7z.001.enc` | `078386d3ad550d438dcaa2f6297e5b75112e4fbaea6731685d56bc7e8254877c` | `9d001d6c56ae12f29cf4244f6ac13c64f540b11b50df5ddecfebd0f9f058e40c` | 209,715,200 B |
-| `3138.7z.002.enc` | `42ef9720fef2b13cea7548be26261ce0b29df07aaddeb06208a70fbf7c9c9623` | `46abe32caa76660bc87ef9b52d4699d4129ff4fcd86994ccd80ac365d04ce840` | 60,508,410 B |
-
-两行明文的 SHA-256 与 Paranoia 原软件解出的 `3138.7z.001` / `3138.7z.002` 逐字节一致（独立 Java Oracle 用 `cmp` 复核，见 §5）。
-
----
-
-## 2. 自动化测试
+## 2. 自动测试（本机可复现）
 
 命令：
 
@@ -38,281 +25,207 @@
 cargo test --workspace
 ```
 
-结果（记录于最终验收运行）：
+2026-10-24 v0.3.0 实测结果（`cargo test --workspace`，exit 0；下表为最后一次记录，
+若本轮改动后重跑请以实际输出为准）：
 
-| 测试目标 | 结果 |
-| --- | --- |
-| `paranoia-enc-core` 单元测试 | **35 passed**, 0 failed |
-| `tests/oracle_vectors.rs`（Rust ↔ Java Oracle 向量） | **1 passed** |
-| `tests/real_sample.rs`（真实样本，默认 `#[ignore]`） | 2 ignored（见 §3 手动启用记录） |
-| doc-tests / CLI | 0（CLI 无单元测试，行为由 E2E 覆盖） |
+| target | 通过 | 失败 | ignored | 内容 |
+|---|---|---|---|---|
+| `unparanoia_core`（unit） | 43 | 0 | 0 | decrypt 15、format 7、config 6、output 5、kdf 4、crypto 3、batch 3 |
+| `tests/oracle_vectors.rs` | 1 | 0 | 0 | 回放 `verification/oracle/test-vectors.json`（见 §3） |
+| `unparanoia_unpack_core`（unit） | 47 | 0 | 0 | detect 9、engine 8（含 password_candidates 顺序/去重/重试）、settings 6、layout 6、ssefe 5、sevenzip 5、sfx 3、processed 3、queue 2 |
+| `tests/real_sample.rs` | 0 | 0 | **2** | 真实样本解密（需环境变量，见 §5） |
+| CLI / GUI / doc-tests | 0 | 0 | 0 | 无测试 |
+| **合计** | **91** | **0** | **2** | 2026-10-24 v0.3.0 实测；耗时约 3.3 s（release 构建另计） |
 
-覆盖点（对应验收要求）：
+`oracle_vectors` 的比对范围（`crates/core/tests/oracle_vectors.rs:82-103`）：
+header raw/version/algorithm/customParams、salt、Argon2 t/m/p/output_len、
+`derive_l0_password_hash`、`encKey/nonce/authKey` 的字节相等。
+**它不比对 MAC、checkcode、ZIP CRC、明文 SHA-256**——那些只由外部 Java Oracle
+在 2026-10-23 验证过（§4），不在 Rust 测试的回放范围内。任何声称
+"Rust 测试验证了 MAC"的说法都是不准确的。
 
-- 文件头解析：magic / version / algorithm / customParams / salt 长度与偏移（`format.rs`）。
-- 密钥派生：`password_to_bytes` 码点规则、HKDF-Skein1024→Argon2id→HKDF-SHA3-512 全链，含样本 001 的已知向量（`kdf.rs`）。
-- 解密正确性：合成容器 round-trip、STORED / DEFLATED 内层 ZIP、CRC32、文件名恢复（`decrypt.rs`）。
-- 错误密码：checkcode 校验失败 → `wrongPassword`，且不留下临时/半成品文件（`decrypt.rs`）。
-- 输出路径解析：默认目录 = 首个待解密文件所在目录；自定义目录覆盖；重名策略 `rename` / `overwrite` / `error`（`output.rs`、`batch.rs`）。
-- 密码记忆：读写、清除、路径解析（`config.rs`，使用临时目录避免污染真实配置）。
-- 批量隔离：单文件失败不影响其余文件，计数与输出目录正确（`batch.rs`）。
+## 3. Oracle 测试向量（`verification/oracle/test-vectors.json`）
 
-真实样本集成测试（需提供本地样本，默认忽略）：
+来源：独立 Java Oracle 对两个真实样本 `3138.7z.001.enc` / `3138.7z.002.enc`
+（密码 `123`，customParams `0x11`）的输出快照，提交进仓库供离线回归。
+每个 sample 字段：`headerHex`、`customParamsByte`、`argon2Params`、`saltHex`、
+`l0PWHashV3Hex`（128 B）、`argon2OutputHex`（256 B）、`encKeyHex`/`nonceHex`/
+`authKeyHex`、`storedMacHex`/`computedMacHex`/`macMatch`、`checkCode*`、
+`innerZipSize`/`zipEntries[]`（CRC/SHA-256）、`decryptedSha256`/`expectedSha256`、
+`byteCompareWithOriginal` 等。另有 `negativeTests`（错误口令）。
+
+测试只断言 Rust 实现与向量中的 **KDF/密钥派生** 一致；向量文件里 MAC/CRC/
+明文字段是 Oracle 的历史输出记录，不是 Rust 测试的断言对象。
+
+## 4. 真实样本的外部 Java Oracle 验证（历史记录，当前不可重跑）
+
+- 文档：`docs/oracle-report.md`（362 行，含逐命令/逐字节记录）；
+- 实现：`verification/oracle/src/oracle/Oracle.java`（690 行，独立重写容器解析与
+  KDF 接线，密码学原语复用官方 Java 源码树，Rust 实现**未被参考**）；
+- 样本：`/Volumes/Carrot/Download/3138.7z.001.enc`（209,779,415 B）与
+  `3138.7z.002.enc`（60,527,110 B），原明文 `.7z` 文件当时在样本旁；
+- 结论（2026-10-23）：两个样本 MAC 通过、checkcode 为 32 位 `[a-z0-9]` 合法、
+  内层 ZIP 每个条目 CRC32 与 SHA-256 通过、解密明文 SHA-256 与期望值一致、
+  `cmp` 与原始文件逐字节一致；错误口令 `456` 被拒绝。
+
+期望明文 SHA-256（记录于 oracle-report 与 `verification/oracle/test.sh`）：
+
+```text
+001: 9d001d6c56ae12f29cf4244f6ac13c64f540b11b50df5ddecfebd0f9f058e40c
+002: 46abe32caa76660bc87ef9b52d4699d4129ff4fcd86994ccd80ac365d04ce840
+```
+
+**当前不可重跑的原因**（2026-10-24 核查）：`/tmp/jdk21` 与 `/tmp/paranoia-pc`
+均不存在；`/Volumes/Carrot/Download` 只剩两个 `.enc`，原明文 `.7z` 已不在，
+`cmp` 无法重做。仓库内的 `test-vectors.json` 是唯一可离线回放的部分。
+
+复现前提（未来要重跑时）： Temurin JDK 21 + 官方 Paranoia v4 源码树
+（`PARANOIA_PC` 指向含 `CryptoLibs/src` 的目录）+ 原始 `.7z` 明文文件。
+然后：
 
 ```bash
-PARANOIA_SAMPLE_ENC=/path/to/3138.7z.002.enc \
-PARANOIA_SAMPLE_SHA256=46abe32caa76660bc87ef9b52d4699d4129ff4fcd86994ccd80ac365d04ce840 \
-PARANOIA_SAMPLE_PASSWORD=123 \
-cargo test -p paranoia-enc-core --test real_sample -- --ignored --nocapture
+./verification/oracle/build.sh
+./verification/oracle/test.sh          # 最后一行: ALL CHECKS PASSED (MAC, checkcode, CRC, SHA-256, cmp, wrong-password)
 ```
 
-结果：2 passed。其中批量测试准备了 2 个正确密码副本 + 1 个被翻转首字节密码错误的副本，断言 2 成功 / 1 失败、失败原因为 `wrongPassword`、无残留输出。样本解密后 SHA-256 与期望值一致，样本本身未被修改。
+## 5. Rust 真实样本测试（默认 ignored，需外部样本）
 
----
-
-## 3. 命令行端到端（核心逻辑）
-
-所有 E2E 均在样本的 **/tmp 副本**上进行，原始 `/Volumes/Carrot/Download/*.enc` 只读未改动。
-
-### 3.1 单文件 + 哈希比对
+`crates/core/tests/real_sample.rs` 两个测试：
 
 ```bash
-cargo run --release -p paranoia-enc-cli -- /tmp/e2e/inputs/3138.7z.002.enc -p 123
-shasum -a 256 /tmp/e2e/inputs/3138.7z.002
+PARANOIA_SAMPLE_ENC=/path/3138.7z.001.enc \
+PARANOIA_SAMPLE_SHA256=9d001d6c...e40c \
+cargo test -p unparanoia-core --test real_sample -- --ignored
 ```
 
-输出（节选）：
+- 测试 1：`decrypt_file` 输出与期望 SHA-256 一致；
+- 测试 2：batch 对同一输入的两个副本各解一次。
+- 注意：`PARANOIA_SAMPLE_ENC` 是**单个**文件（测试 2 会复制成两份），
+  不是目录。
 
-```
-OK   3138.7z.002
-successes 1 failures 0
-46abe32caa76660bc87ef9b52d4699d4129ff4fcd86994ccd80ac365d04ce840  /tmp/e2e/inputs/3138.7z.002
-```
-
-- 输出文件大小 60,508,410 B，与原始明文一致；哈希与 §1 表中期望值一致。
-- 输出目录默认 = 输入文件所在目录；原始文件名与扩展名 `3138.7z.002` 从文件头元数据（内层 ZIP entry 名）恢复。
-- 耗时约 0.45 s（含 Argon2id 派生，60 MB 样本，Apple Silicon）。
-
-### 3.2 文件头检查（--inspect）
+## 6. CLI 端到端（e2e，本机可复现）
 
 ```bash
-cargo run --release -p paranoia-enc-cli -- --inspect /tmp/e2e/inputs/3138.7z.002.enc
+./scripts/make-fixtures.sh     # 生成 testdata/fixtures/（需要 binaries/mac/7zz；结构可复现，非字节稳定）
+./scripts/e2e-verify.sh        # 2026-10-24 v0.3.0: 75 项检查全部通过，最后一行 ALL E2E CHECKS PASSED
 ```
 
-关键字段：magic `SSEFE`，version 4，algorithm 0（AES-256），customParams `0x11`（Argon2id t=20，m=20480 KiB，p=4），salt
-`f0131e597c16317aeb749495f04593df2b0ac15a4e2f0768c7a493f7abe7e210`。
+覆盖（`scripts/e2e-verify.sh`，独立临时配置目录，不碰真实配置）：
 
-### 3.3 批量 + 失败隔离 + 默认输出目录
+1. `--version` 含 0.3.0；`doctor` 报告 7-Zip；`--help` 列出子命令；
+2. `detect --json` 识别 `ssefe_encrypted` / `masked_archive`；`inspect` 显示 SSEFE 头；
+3. `sample.enc`（SSEFE，pw 123）解密出 `hello.txt`（v0.3.0 fixture 内容为
+   `hello unparanoia v0.3.0`），SHA-256 匹配，无 staging 残留；
+4. `nested.enc` → `nested.zip` → `nested-inner.zip` → `hello.txt` 级联；
+5. `normal.zip` smart layout 产出 `normal/hello.txt` + `normal/docs/readme.txt`；
+   加密 7z（`-mhe=on`，pw 123）与前缀 ZIP（`masked.mp4`，4 KiB 前缀）均正确解出；
+6. 错误口令 / 无口令：exit 1、提示需要密码、零产出；
+6b. **逐层多密码**：`layered.enc`（外层 pw=outer，内层 7z pw=inner）用
+   `-p wrong -p outer -p inner` 一次成功，stderr 出现 `使用候选密码` 警告；
+   只给外层密码时 **exit 0（部分成功）**：保留已解出的内层归档
+   `encrypted-inner.7z`、不产生 `hello.txt`，stderr 给出
+   「内层归档「…」需要密码…保留外层内容」警告。
+   **这是 v0.3 的既定语义，不记为失败**：若把内层缺密码记为 NeedsPassword/Failed，
+   重试会重做外层并产生重复输出；保留内层归档可让用户单独补密码再解。
+   这也满足"失败不得破坏已成功输出"的约束（外层成果留在输出目录）；
+7. `--json` 输出 JSON Lines：`task_detected`、`task_finished`、末行 `{"type":"summary",...}`，
+   每行可被 `json.loads` 解析；
+8. `--dry-run` 不写文件；`--conflict rename` 生成 `hello (1).txt`；`--layout folder` → `sample/hello.txt`；
+9. `config --show/--set-password/--clear-password`（v0.2.0 兼容）以及
+   `--add-password/--list-passwords/--remove-password/--clear-passwords`：
+   密码库文件创建、Unix 0600、无 `-p` 时自动用密码库解密成功、删空/清空；
+   `cleanup-staging` 只删 `.unparanoia-tmp-*`；
+10. 用法错误（非法 `--conflict` 值、未知参数）exit 2。
 
-```bash
-# 2 个正确副本 + 1 个被截断到 30,000,000 B 的副本；不传 -o，验证默认输出目录
-cargo run --release -p paranoia-enc-cli -- \
-  /tmp/e2e2/inputs/3138.7z.002.enc \
-  /tmp/e2e2/inputs/3138.7z.002-copy.enc \
-  /tmp/e2e2/inputs/truncated.enc -p 123
-```
+fixture 内容（`testdata/fixtures/`，gitignored；每次生成 mtime/salt 不同，但内容与结构一致）：
+`normal.zip`、`inner.zip`、`nested.zip`、`encrypted.7z`（pw 123）、
+`encrypted-inner.7z`（pw inner）、`masked.mp4`、
+`sample.enc`（make_enc 生成，pw 123，customParams 0x00）、`nested.enc`、
+`layered.enc`（外层 pw outer、内层 7z pw inner）、`SHA256SUMS`。
 
-结果：successes 2 / failures 1，退出码 1；两个成功输出的 SHA-256 均为 `46abe32c…d04ce840`；默认输出目录为**首个文件所在目录** `/tmp/e2e2/inputs`；第二个成功文件因重名按默认 `rename` 策略写为 `3138.7z (1).002`；截断文件报
-`file integrity check failed (BLAKE3 MAC mismatch): the file is corrupted or was modified (integrity)`；无临时文件或半成品残留。
+## 7. 构建产物（v0.3.0，macOS arm64）
 
-### 3.4 异常路径
+> **状态：已在 2026-10-24 16:13（macOS）与 16:16（Windows 交叉编译）由 Lead
+> 在代码冻结后构建。** 下表是**当次**产物的实测值；每次重建（即使源码相同）哈希都会变，
+> 重新构建后必须更新本表。产物路径均在 workspace 根 `target/release/`。
+>
+> 与旧版（v0.2.0）的关系：v0.2.0 时代的产物数字已过时，且代码/名称均已变化，
+> 本文件不再保留旧哈希，避免误引用。
 
-| 场景 | 结果 |
-| --- | --- |
-| 密码错误 | `incorrect password (wrongPassword)`，退出码 1，输出目录为空（无半成品） |
-| 文件截断 / 篡改 | `integrity`（BLAKE3 MAC 不匹配），不会写出文件 |
-| 重名 + `--conflict error` | `output file already exists: …/3138.7z.002 (outputExists)` |
-| 同目录重复解密（默认 `rename`） | 生成 `3138.7z (1).002`，reported original_name 仍为 `3138.7z.002` |
-| `--json` | 输出机器可读 `{outcomes, successes, failures, outputDir}`，字段为 camelCase |
-| 密码记忆 CLI | `--config-path` / `--clear-password` 可用；CLI 不会写入密码（记忆仅 GUI 提供） |
+| 产物 | 大小 (B) | SHA-256 |
+|---|---|---|
+| `target/release/bundle/dmg/Unparanoia_0.3.0_aarch64.dmg` | 8,185,594 | `721c862545914cd11c707f3a2ce554100f2b3822b7e369d1a91816bb2f5b6e1a` |
+| `.app` 内主二进制（`bundle/macos/Unparanoia.app/Contents/MacOS/unparanoia`） | 7,315,392 | `76d9c9018d532b66a3c2ba0d4e5bb7ceffadf398f4e9c765ee3fdc2367b69ddb` |
+| GUI 裸二进制 `target/release/unparanoia` | 7,315,392 | `76d9c9018d532b66a3c2ba0d4e5bb7ceffadf398f4e9c765ee3fdc2367b69ddb`（与 .app 内相同） |
+| CLI `target/release/unparanoia-cli` | 2,706,464 | `75730f72f9122abba716c329d5ef45c86abd0815d6d2ccd9e2741fd9e2c13d74` |
+| Windows GUI exe（xwin，`target/x86_64-pc-windows-msvc/release/unparanoia.exe`） | 10,962,944 | `15df510b5f8ec458748fe2cdb9ac97e7affa516ee69f7dc0c33e2c35918f8086` |
+| Windows CLI exe（xwin，`target/x86_64-pc-windows-msvc/release/unparanoia-cli.exe`） | 3,584,000 | `34ceb172e448a00f2902046cc57f49a5dc140f43806e3267a335b4c224de0a50` |
+| Windows 便携 zip `Unparanoia-0.3.0-win-x64-portable.zip` | 5,855,710 | `8799f0476b5d5247f089071fcbd5a1d75c51f2d8260149c3738e8c06b99df187` |
 
-### 3.5 性能与体积（CLI）
+当次核对（2026-10-24 16:20）：
 
-- 释放版 CLI：`target/release/paranoia-enc-cli` 约 **750,624 B**（0.72 MiB），启动到输出 `--version` 约 0.00 s。
-- 60 MB 样本解密约 0.45 s；209 MB 样本同量级线性增长（Argon2id 约 0.3 s 固定成本）。
+- 两个 Mach-O 均为 arm64；DMG 挂载后 `.app` 主二进制与裸二进制 SHA-256 一致，
+  `Contents/Resources/binaries/mac/7zz` SHA-256 为 `5c2fd36f…`（与 `binaries/mac/7zz` 一致），
+  `Info.plist` 为 0.3.0 / `com.nanase.unparanoia` / minOS 12.0。
+- Windows 两个 exe 为 PE32+ x86-64（GUI / console）；便携 zip 用 `7zz l` 核对为 7 个文件、
+  1 个目录，zip 内 `SHA256SUMS` 与各文件（含 7z.exe/7z.dll/7z-LICENSE.txt）自洽。
+- `codesign --verify --deep --strict` 对 .app **仍失败**（"code has no resources but
+  signature indicates they must be present"），即产物为 ad-hoc 签名、不可直接分发。
 
----
+构建命令：macOS 用 `./scripts/build.sh`（先 `cargo test --workspace`，再
+`pnpm --dir gui install --frozen-lockfile` + `pnpm --dir gui tauri build`，最后构建 CLI）；
+Windows 便携版用 `./scripts/build-windows-portable.sh`（cargo-xwin）。产物核对项：
+DMG 内 `.app` 的 `Contents/Resources/binaries/{mac/7zz, 7z-LICENSE.txt}` 存在、
+`7zz` 哈希与 `binaries/mac/7zz` 一致、`Info.plist` 的版本 / `com.nanase.unparanoia` /
+minOS 12.0 正确；Windows zip 的 7 个条目与 SHA256SUMS 自洽。注意 v0.2.0 曾因
+`target/release/bundle/macos/` 残留半成品 dmg（512 B）与 `rw.<pid>.*.dmg` 导致
+`bundle_dmg.sh` 报 `hdiutil convert` "文件已经存在"；清理残留后重跑即可，
+详见 docs/BUILD.md §7。
 
-## 4. 真实样本逐字节验证汇总
+`codesign --verify --deep --strict` 对 v0.3.0 的 .app **失败**（报
+"code has no resources but signature indicates they must be present"），即本机产物为
+ad-hoc 签名、不可直接分发。分发前必须用 Developer ID 重签并公证。
 
-| 样本 | CLI 解密 SHA-256 | 期望 SHA-256 | 结论 |
-| --- | --- | --- | --- |
-| 001 | `9d001d6c56ae12f29cf4244f6ac13c64f540b11b50df5ddecfebd0f9f058e40c` | 同左 | ✅ 逐字节一致 |
-| 002 | `46abe32caa76660bc87ef9b52d4699d4129ff4fcd86994ccd80ac365d04ce840` | 同左 | ✅ 逐字节一致 |
+**GUI 启动冒烟（人工，2026-10-24 最终构建后由 Lead 执行，通过）**：
+`open ./target/release/bundle/macos/Unparanoia.app` 可启动；窗口标题
+「Unparanoia 解包器 — 批量解密/解压」、版本 0.3.0、识别内置 `7-Zip 25.01 (arm64)`；
+tabs 为 队列/日志/密码/设置，密码区与配置路径显示正常，默认深色主题。
+截图：`docs/screenshots/gui-0.3.0.png`（启动后即时截取，含新图标与默认深色主题）。
+边界：仅启动级冒烟；交互式切页/拖放/暂停取消未做（尝试用 System Events 自动化时
+accessibility 被系统拒绝，错误 -25208），**不等于**完整 GUI 交互测试（见 §9）。
 
----
+## 8. Windows / Linux 状态
 
-## 5. 独立 Java Oracle 交叉验证
+- Windows：**仅交叉编译验证**。`./scripts/build-windows-portable.sh` 在 v0.3.0 实测
+  exit 0（2026-10-24 16:16）；产出
+  `target/windows-portable/Unparanoia-0.3.0-win-x64-portable.zip`（5,855,710 B，见 §7），
+  含 GUI exe、CLI exe、7z.exe/7z.dll/许可证/README/SHA256SUMS（7 个文件，用 `7zz l`
+  核对过）。两个 exe 均为 PE32+ x86-64。**未在真实 Windows 上运行过**；
+  NSIS 安装包未构建。详见 `docs/WINDOWS_BUILD.md`。
+- Linux：未构建、未验证（Tauri 依赖 WebKitGTK 等，本仓库未提供 Linux 打包配置）。
 
-为避免“自己验证自己”，仓库内包含一个**非 Rust** 的独立校验收具（`verification/oracle/`，Java 21），其中容器布局、KDF 接线、AES-256-CTR 语义、BLAKE3 keyed MAC、checkcode 规则与内层 ZIP/CRC/SHA-256 逻辑均依据 `docs/FORMAT.md` 与官方源码独立重写，加密原语只读复用官方 vendored 代码；**未参考 Rust 实现**。
+## 9. 断言但未验证 / 不可复现清单（必须诚实保留）
 
-复现：
+| 项 | 状态 |
+|---|---|
+| 真实样本 MAC/checkcode/CRC/明文一致性 | 历史 Java Oracle 验证通过；**当前不可重跑**（缺 /tmp/paranoia-pc、/tmp/jdk21、原明文） |
+| `test-vectors.json` 的 MAC/CRC 字段 | 是历史记录，Rust 测试不断言它们 |
+| real_sample.rs 两个测试 | 默认 ignored；本机无样本，未执行 |
+| GUI 手工交互（拖放、暂停/继续/取消、重试、密码管理页、主题切换） | 未做 GUI 自动化测试；仅保证 `pnpm build`、tauri 打包通过；最终构建启动冒烟通过（标题/版本/7-Zip/tabs/密码区/默认深色主题），但交互切页/拖放等未验证（System Events accessibility 被拒 -25208） |
+| 密码库安全性（明文落盘） | 设计即明文 `config.json`（Unix 0600，Windows 无权限位）；这是有意的便利取舍，不是加密保险箱 |
+| 逐层多密码重试的 GUI 路径 | CLI e2e 已覆盖（`layered.enc`）；GUI 只保证命令/界面存在，未做交互自动化 |
+| Windows 真实运行、WebView2、中文路径 | 未验证 |
+| DMG 安装体验/签名/公证 | 未签名、未公证；codesign 校验失败 |
+| CI（.github/workflows/build.yml） | 仓库无远端，workflow 从未在 GitHub 上跑过；本地仅手工执行同等命令 |
+| 7-Zip 二进制与官方下载的逐字节来源比对 | 未做（无网络）；只能靠版本字符串 + 记录哈希 + 继承来源 |
+| 自解压 EXE 执行回退（`--allow-execute-sfx`） | 默认关闭，Windows-only，未验证 |
+| PFTEREC1 恢复容器 | 明确不支持（v3 与恢复容器均未实现） |
 
-```bash
-bash verification/oracle/test.sh
-# 结尾：ALL CHECKS PASSED (MAC, checkcode, CRC, SHA-256, cmp, wrong-password)
-```
-
-结果：
-
-- 两个样本 MAC 校验通过、checkcode 合法、内层 ZIP CRC32 匹配、解密 SHA-256 匹配、`cmp` 与原始明文**逐字节相同**。
-- 错误密码 `456` 被 checkcode 规则拒绝（`wrongPassword`）。
-- CTR 交叉验证：官方 `SICBlockCipher` 与 JDK AES/ECB 生成的 keystream 解密结果逐字节一致。
-- 完整 KDF 中间值（l0PWHashV3 / Argon2 输出 / encKey / nonce / authKey / MAC）存于 `verification/oracle/test-vectors.json`，并由 Rust 集成测试 `crates/core/tests/oracle_vectors.rs` 在默认 `cargo test` 中逐项比对。
-- 完整报告：[docs/oracle-report.md](oracle-report.md)。
-
----
-
-## 6. GUI 验证（macOS arm64）
-
-构建产物（v0.1.1）：`gui/src-tauri/target/release/bundle/macos/Paranoia Decryptor.app`（4.78 MiB，内含 `Contents/MacOS/paranoia-enc-decryptor` 4,855,424 B，Mach-O arm64）。用 `open ./Paranoia Decryptor.app` 启动，进程与窗口正常创建（已实际启动验证后退出）。
-
-验证方式：release 二进制内置验收开关 `--autotest-spec <spec.json> --autotest-report <report.json>`，由真实前端代码驱动「添加文件 → 校验 → 开始解密 → 汇总」的完整数据路径，并在隔离配置目录（`PARANOIA_ENC_CONFIG_DIR=/tmp/guiverify2/config`）下运行；输入为样本副本（`sample-a.enc`、`sample-b.enc` 均为 `3138.7z.002.enc` 副本，另有首字节损坏的 `bad-password.enc`、`notes.txt` 与 5 个伪造头文件）。
-
-| 验收项 | 结果 |
-| --- | --- |
-| 批量添加 + 同一文件去重 | 5 条输入中重复的 `sample-a.enc` 在路径去重阶段合并为 4 个唯一路径；列表无重复项 |
-| 非 `.enc` 文件拒绝 | `notes.txt` 被拒绝加入，原因 `notEncExtension`（“不是 .enc 文件”），其余 3 个有效文件正常入列 |
-| 默认输出目录 = 首个文件所在目录 | 不选目录时输出到 `/tmp/guiverify2/inputs`（首个添加文件父目录），界面显示该路径 |
-| 文件名恢复 | 输出名为 `3138.7z.002`（来自容器内层 ZIP entry 名） |
-| 批量解密 + 失败隔离 | 3 个有效文件：成功 2 / 失败 1；失败文件 `bad-password.enc` 报 `wrongPassword`（“incorrect password”），不影响其余文件；两成功输出 SHA-256 均 `46abe32c…d04ce840` |
-| 整体/单文件进度 | 收到 8 次 `batch-progress` 事件与 3 次 `file-finished` 事件；界面整体进度 100%，计数 2 成功 / 1 失败 / 共 3；每文件行状态为“成功/成功/密码错误” |
-| 物理拖拽（真实 OS 事件） | 用 Swift + Accessibility API 定位 Finder 中 `002.enc` 图标（AXPosition），CGEvent `mouseDown → 40×leftMouseDragged → mouseUp` 拖入 Tauri 窗口：`dropped=true`，`rawEventCount=56` 条真实 `enter/over/drop` 事件（首条 `enter` 携带 `paths=["/private/tmp/gui-test/002.enc"]`），文件成功入列（`fileCount=1`，60527110 B），无错误；见 `/tmp/gui-test/reports/dragdrop-fast.json`、脚本 `axfind.swift`/`drag.swift` |
-| 重复添加同一文件的提示 | 同一路径分两次 `addPaths`：第一次 `accepted=1`，第二次 `duplicates=1, accepted=0`，列表保持 1 个文件，toast 文案“文件已在列表中”（`batch-dedupe.json`） |
-| 密码错误不留半成品 | 失败文件无输出、无临时文件残留 |
-| 重名策略 `rename`（默认） | 第二个同内容输出自动改名为 `3138.7z (1).002`，原始文件名报告仍为 `3138.7z.002` |
-| 重名策略 `error` | 目标已存在时该文件失败，错误 `outputExists`（“output file already exists: …/3138.7z.002”），界面行状态“输出文件已存在” |
-| 重名策略 `overwrite` | 覆盖已有文件并成功，输出 SHA-256 与期望一致 |
-| 自定义输出目录 | 选择 `/tmp/guiverify2/custom-out` 后按该目录输出，界面显示为自定义目录 |
-| 记住密码 + 重启自动填充 | 勾选“记住密码”并完成一次批量后，`config.json` 为 `{"remembered_password":"123"}`；**新进程**启动时密码框自动填充、勾选框保持勾选（`autoFilled=true`，`passwordLength=3`） |
-| 一键清除记忆 | 调用清除入口后配置目录清空、`rememberedPasswordPresent=false`；再次启动不填充密码 |
-| 非法文件拒绝（5 类） | `fake-algorithm.enc`（非 AES-256 算法）、`fake-version.enc`（版本 5）、`fake-magic.enc`（magic 错误）、`short.enc`（13 B 过短）、`fake-params.enc`（customParams 超实现保护范围）全部被拒绝；提示“拒绝 5 个（不是 AES-256 加密文件、不支持的格式版本、不是 Paranoia 加密文件 等）”；列表为空时“开始解密”按钮禁用 |
-| 启动耗时 | 进程启动 → 窗口创建约 0.24–0.31 s；进程启动 → 界面就绪（`ui_ready`）冷启动 740 ms，热启动 402–464 ms；3 文件 120 MB 批量（含 1 次失败）界面端到端 1.47 s |
-| 打包产物运行 | `.app` 双击/`open` 启动成功，系统进程名为 `paranoia-enc-decryptor` |
-
-**人工检查项（本环境无法自动化的部分，交付时如实说明）**：
-
-- **物理拖拽**：已在本机用 OS 级合成事件自动化验证（见上表“物理拖拽”行：真实 `enter/over/drop` 事件流 + 文件入列），并确认拖拽落点与文件对话框共用同一 `addPaths` 处理管线（批量用例已覆盖）。真实人手拖动未试，但 OS 事件路径等价。
-- **系统文件选择对话框**：实现为 Tauri dialog 插件 `blocking_pick_files`（`.enc` 过滤 + 多选），其原生弹窗点击无法自动化；多选后的处理逻辑与拖拽共用 `addPaths`，已覆盖。
-- 建议用户首次运行后按 README「快速开始」做一次真实拖拽 + 对话框多选确认（1 分钟）。
-
----
-
-## 7. v0.1.1 修复与重新构建（解密失败闪烁 / 新图标 / Windows 便携版）
-
-### 7.1 问题与根因
-
-用户反馈：批量解密时，个别文件行会**短暂显示「解密失败」，随后又变为「成功」**（最终结果正确）。
-
-根因：core 的 `run_batch` 在 `decrypt_file` 的进度回调里携带的 `successes` / `failures` 是该文件处理**之前**的批次计数（计数在文件结束后才更新）。GUI 的 `BatchEmitter` 原先依据「`file_processed >= file_total` 且当时 `failures > 0`」推断当前文件失败并先发一条临时 `file-finished` 事件，之后真正的完成事件才把行状态改为「成功」。因此只要批次中前面有文件失败过，后续成功文件会在最后一个数据块回调时被误渲染一次「失败」。
-
-修复（`gui/src-tauri/src/commands.rs`）：`BatchEmitter` 增加 `successes_seen` / `failures_seen` 基线；仅当进度中的成功/失败计数**相对基线发生变化**（即该文件已结算）时才发临时完成事件，且 `ok` 由计数增量判断，而非 `failures > 0`。真正完成事件仍由最终计数驱动。
-
-### 7.2 验证（25 ms 采样 + 事件时间线）
-
-release 二进制内置 autotest 在批处理期间每 25 ms 采样一次工具栏计数与每行状态文本，记录全部 `file-finished` 事件，并统计「最终成功但采样期间出现过『失败』文案」的次数（`transientFailOnSuccess`）。
-
-| 场景 | `file-finished` 事件（`ok`） | 采样 | 结果 |
-| --- | --- | --- | --- |
-| 2 个成功 + 1 个错误密码（`bad-password.enc`：首字节损坏 → `wrongPassword`） | `true, true, false` | 整批 25 ms 采样 | `transientFailOnSuccess=0`，无任何瞬时「失败」文案；行状态最终「成功 / 成功 / 密码错误」 |
-| 3 个全部成功 | `true, true, true` | 整批 25 ms 采样 | `transientFailOnSuccess=0`；成功 3 / 失败 0 |
-
-- 两个成功输出的 SHA-256 均为 `46abe32caa76660bc87ef9b52d4699d4129ff4fcd86994ccd80ac365d04ce840`；失败文件无输出、无临时/半成品文件残留。
-- 密码记忆不受影响：新进程启动时 `autoFilled=true`、`passwordLength=3`。
-- 回归：`cargo test --workspace` → 35 个 core 单元测试 + 1 个 oracle 向量测试通过，2 个 real_sample 测试 ignored；`cargo check`（GUI）通过。
-
-### 7.3 应用图标（按反馈扁平化重绘）
-
-- 首版图标为渐变 + 高光的拟物化挂锁；按用户反馈重绘为**扁平几何风格**：深蓝底（`#0044B8`）+ 浅蓝圆（`#1F80F9`）+ 纯白开口挂锁，**仅三种纯色，无渐变、无高光、无阴影**。
-- 母版以 Pillow 绘制的几何图形确定性生成（4096 画布渲染后 LANCZOS 降采样），按 macOS Big Sur 图标网格（824/1024 内容区）输出 `gui/src-tauri/icons/app-icon.png`；由 `pnpm tauri icon` 生成 `.icns`（157,861 B）/ `.ico`（23,054 B）/ 各尺寸 PNG。
-- macOS 应用图标、窗口标题栏、页面顶部品牌图标与页签 favicon 均使用新图标（`gui/src/app-icon.png` 256px，`index.html` 引用）。
-- 重绘后重新构建了 macOS 产物并复核了 Windows exe 内嵌图标（见 §7.4、§7.5）；新界面截图见 `docs/screenshots/gui-main.png`（v0.1.1）。
-
-### 7.4 macOS arm64 重新构建（v0.1.1）
-
-- 命令：`cd gui && pnpm tauri build`；release 增量编译 35.37 s（图标重绘后重新构建）。
-- 裸二进制：4,855,424 B，SHA-256 `84cca06c8e7d93808c05d4d07e6aea56d775e8d72f30b8a633f4c1ceda59246d`，Mach-O arm64。
-- `.app`：4.78 MiB（`du`）；`.dmg`：`Paranoia Decryptor_0.1.1_aarch64.dmg` 2,296,239 B（扁平图标使 `.icns` 从 1.2 MB 降到 158 KB，DMG 随之显著变小），SHA-256 `0451ba58858b598292f36a0ee450d08781c2a809d755ab6f4907d7d544b40cdc`。
-- 启动验证：运行 `.app` 内二进制，窗口正常创建；System Events 确认进程 `paranoia-enc-decryptor`；截图确认「就绪 · v0.1.1」、新图标与密码自动填充。
-
-### 7.5 Windows x64 单文件便携版 exe
-
-- 构建：`./scripts/build-windows-portable.sh`（内部为 `cargo xwin build --release --target x86_64-pc-windows-msvc`，rustup stable）。**图标重绘后必须先把 `gui/src-tauri/build.rs` 的 mtime 更新（`touch`）再编译**：`tauri-build` 的构建脚本不会因图标内容变化自动重跑，否则产物内仍嵌旧图标（本次已用 `icon.ico` PNG 负载与 exe 字节比对发现并修正）。
-- 产物：`gui/src-tauri/target/x86_64-pc-windows-msvc/release/paranoia-enc-decryptor.exe`，6,905,856 B，SHA-256 `1f5a4d0bf809a1c6919359d284f4d9915054b717f89a1edd0d538205a79741e8`，PE32+ GUI x86-64（Subsystem=2，`.rsrc` 0x5fd0）；已比对确认内嵌新 `.ico` 的 5 个 PNG 负载。
-- 单文件便携：前端静态资源与 Rust 后端全部内嵌；导入表只有 Windows 系统 DLL + UCRT（无 `VCRUNTIME140.dll`、无 `WebView2Loader.dll`），无需随附 DLL/目录。运行时依赖系统 WebView2 Runtime（Windows 11 自带；Windows 10 通常随 Edge/系统更新安装）。
-- 静态 CRT 尝试失败记录与逐项检查见 `docs/WINDOWS_BUILD.md` §5.4。
-- **诚实边界**：未在真实 Windows 机器/虚拟机上运行（本机无 Windows、无 Wine）；Windows 从零构建与运行验证仍以 `.github/workflows/build.yml` 的 `windows-latest` 任务为准（仓库无 remote，尚未实际执行）。
-
-### 7.6 交付目录（桌面）
-
-`Paranoia-Decryptor-0.1.1/`：`Paranoia-Decryptor-0.1.1-macos-arm64.dmg`（2,296,239 B，SHA-256 `0451ba58…b40cdc`）、`Paranoia-Decryptor-0.1.1-windows-x64-portable.exe`（6,905,856 B，SHA-256 `1f5a4d0b…79741e8`）、`SHA256SUMS.txt`、`使用说明.txt`。该目录是构建产物的拷贝，不属于 Git 仓库内容。
-
----
-
-## 8. 构建验证
-
-### 8.1 macOS arm64（本机从零构建并运行，v0.1.0 记录）
-
-> 说明：以下为 v0.1.0 的从零构建与运行记录，仍然有效；v0.1.1 的重新构建与产物哈希见 §7.4。
-
-- 环境：macOS 27.2 arm64，rustc 1.99.0，Node v26.10.0，pnpm 11.27.0，Tauri CLI 2.12.4
-- 一键脚本：`./scripts/build.sh` exit 0（其内部依次执行 `cargo test --workspace`、`pnpm install`、`pnpm tauri build`）；该次 GUI 增量构建 41.37 s
-- 最终 release 重新构建：`cd gui && pnpm tauri build` 成功（30.53 s，release）
-- 测试：35 个 core 单元测试 + 1 个 oracle_vectors 通过，2 个 real_sample 默认 ignored
-- 产物（`gui/src-tauri/target/release/`）：
-  - `bundle/macos/Paranoia Decryptor.app` — 4.7 MiB；`Contents/MacOS/paranoia-enc-decryptor` 4,838,912 B
-  - `bundle/dmg/Paranoia Decryptor_0.1.0_aarch64.dmg` — 2,137,598 B（`du` 2.0 MiB）
-  - 裸二进制 `paranoia-enc-decryptor` — 4,838,912 B
-- `file`：`Mach-O 64-bit executable arm64`（app 内二进制相同；原生 arm64，无 Rosetta）
-- 部署目标：`LC_BUILD_VERSION platform MACOS, minos 11.0, sdk 27.0`
-- 签名：ad-hoc / linker-signed（`flags=0x20002`），未公证；首次运行需右键“打开”或在“隐私与安全性”放行
-- 实际启动：`open` 后进程与窗口正常创建（见 §6）
-- CLI 释放版：750,624 B；60 MB 样本解密约 0.45 s
-- **独立从零构建证明**：使用全新 `CARGO_TARGET_DIR=/tmp/paranoia-zero-target`（不触碰仓库内 `target/`）执行 `cd gui && pnpm tauri build`，全量编译 1m07s 成功；产物 `.app` 4.75 MiB、`.dmg` 2,152,698 B、裸二进制 4,855,408 B，均为 Mach-O arm64。用该全新二进制做核心验收（2 个样本副本 + 1 个首字节损坏副本，密码 `123`，未指定输出目录）：默认输出到首个文件所在目录，成功 2 / 失败 1（`wrongPassword` 隔离），两份输出 SHA-256 均为 `46abe32c…d04ce840`。
-
-### 8.2 Windows x64
-
-**仓库配置的权威路径**：`.github/workflows/build.yml` 含 `windows-latest` 矩阵任务，执行 `pnpm tauri build --bundles nsis` 产出 NSIS 安装包；该 workflow 是 Windows 从零构建的权威路径。**如实说明：仓库当前没有远端（no remote），workflow 尚未实际运行过**，因此本报告没有 Windows CI 运行记录。
-
-**本机交叉编译证据**（可复现，详见 `docs/WINDOWS_BUILD.md` §4/§5）：
-
-- 工具链：rustup stable + `cargo-xwin 0.23.1`（MSVC target `x86_64-pc-windows-msvc`）；必须使用 rustup 的 stable 工具链（Homebrew rustc 缺 Windows std，报 E0463）
-- 产物：
-  - `paranoia-enc-cli.exe` — 781,312 B
-  - `paranoia-enc-decryptor.exe`（GUI）— v0.1.0 首次为 6,886,912 B；v0.1.1 重新交叉编译（图标重绘后重编）后为 6,905,856 B 的**单文件便携版**（见 §7.5）
-  - 均为 PE32+ x86-64；GUI 子系统 `Subsystem=2`（Windows GUI）
-- **未在 Windows 上执行**，也未用 Wine 模拟运行冒充原生验证（本机未安装 Wine）；无 NSIS 安装包（交叉编译不产出 NSIS）。
-- 结论：Windows x64 的“从零构建并成功运行”证据分为两段——交叉编译证明代码可面向 MSVC x64 构建；原生运行需推送仓库到 GitHub 后由上述 workflow 产出并安装验证。
-
----
-
-## 9. 复现命令
+## 10. 复现全部本机可复现项
 
 ```bash
-# 1) 单元/集成测试
 cargo test --workspace
-
-# 2) CLI（本机）
-cargo run --release -p paranoia-enc-cli -- --inspect <sample>.enc
-cargo run --release -p paranoia-enc-cli -- <sample>.enc -p <password>
-
-# 3) 真实样本（需本地样本）
-PARANOIA_SAMPLE_ENC=... PARANOIA_SAMPLE_SHA256=... PARANOIA_SAMPLE_PASSWORD=... \
-  cargo test -p paranoia-enc-core --test real_sample -- --ignored --nocapture
-
-# 4) 独立 Java Oracle
-bash verification/oracle/test.sh
-
-# 5) 一键构建 GUI + 测试
+./scripts/make-fixtures.sh
+./scripts/e2e-verify.sh
 ./scripts/build.sh
 ```
-
----
-
-## 10. 已知限制（与首期范围一致）
-
-- 仅支持 Paranoia v4 容器、AES-256（algorithm code 0）；其他算法/版本明确报错。
-- 不支持 PFTEREC1 内嵌恢复数据（检测到时明确报 `unsupportedRecovery`，不猜测）。
-- 不实现加密。
-- 密码记忆为本地明文存储（路径与风险见 README）；不联网、不上传。
-- Windows x64：本机无 Windows 物理机/虚拟机，已完成 cargo-xwin 交叉编译（CLI exe 与 GUI 单文件便携版 exe，均为 PE32+；便携版见 §7.5）；原生运行验证依赖仓库推送后 `.github/workflows/build.yml` 的 windows-latest 任务，报告中如实区分。

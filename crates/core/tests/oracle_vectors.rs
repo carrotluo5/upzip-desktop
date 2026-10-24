@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use paranoia_enc_core::{
+use unparanoia_core::{
     derive_keys, derive_l0_password_hash, parse_argon2_params, parse_header,
 };
 

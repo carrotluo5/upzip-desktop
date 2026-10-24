@@ -183,7 +183,7 @@ mod tests {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let dir = std::env::temp_dir().join(format!(
-            "paranoia-enc-test-batch-{tag}-{}-{nanos}",
+            "unparanoia-enc-test-batch-{tag}-{}-{nanos}",
             std::process::id()
         ));
         fs::create_dir_all(&dir).unwrap();

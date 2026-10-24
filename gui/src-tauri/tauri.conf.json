@@ -1,35 +1,40 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Paranoia Decryptor",
-  "version": "0.1.1",
-  "identifier": "com.nanase.paranoia-decryptor",
+  "productName": "Unparanoia",
+  "version": "0.3.0",
+  "identifier": "com.nanase.unparanoia",
   "build": {
-    "frontendDist": "../src"
+    "beforeDevCommand": "pnpm sync:binaries && pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm sync:binaries && pnpm build",
+    "frontendDist": "../dist"
   },
   "app": {
-    "withGlobalTauri": true,
     "windows": [
       {
         "label": "main",
-        "title": "Paranoia 解密工具",
-        "width": 900,
-        "height": 640,
-        "minWidth": 840,
-        "minHeight": 600,
+        "title": "Unparanoia 解包器 — 批量解密/解压",
+        "width": 1120,
+        "height": 780,
+        "minWidth": 880,
+        "minHeight": 560,
         "resizable": true,
         "center": true,
-        "visible": true,
-        "focus": true,
-        "dragDropEnabled": true
+        "dragDropEnabled": true,
+        "backgroundColor": "#14161a"
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src ipc: http://ipc.localhost"
     }
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["app", "dmg"],
+    "resources": [
+      "binaries/mac/7zz",
+      "binaries/7z-LICENSE.txt"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -38,11 +43,11 @@
       "icons/icon.ico"
     ],
     "category": "Utility",
-    "shortDescription": "Paranoia 文件解密工具",
-    "longDescription": "用于解密 Paranoia File Encryption (SSEFE v4, AES-256) 加密文件的桌面工具。",
+    "shortDescription": "Unparanoia 文件解包 / 批量解压工具",
+    "longDescription": "解密 Paranoia File Encryption (SSEFE v4, AES-256) .enc 文件，并批量解压 zip/7z/rar 等压缩包、伪装容器与自解压文件。",
     "copyright": "© 2026 nanase",
     "macOS": {
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "12.0"
     }
   }
 }

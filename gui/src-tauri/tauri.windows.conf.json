@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": [
+      "binaries/win/7z.exe",
+      "binaries/win/7z.dll",
+      "binaries/7z-LICENSE.txt"
+    ]
+  }
+}

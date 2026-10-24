@@ -1,0 +1,281 @@
+#!/usr/bin/env bash
+#
+# unparanoia — CLI 端到端验证（e2e）
+#
+# 在仓库内生成的 fixture 上跑真实 CLI（调用随附 7-Zip），断言:
+#   退出码 / 输出布局 / 文件内容 sha256 / JSON Lines / 密码流程 /
+#   nested 级联 / conflict 策略 / dry-run / cleanup-staging / config。
+#
+# 用法: ./scripts/e2e-verify.sh
+#   - 需要 testdata/fixtures/（缺失时自动调用 scripts/make-fixtures.sh，需要 macOS + binaries/mac/7zz）
+#   - 使用独立的临时配置目录（不碰用户真实 config.json / processed.json）
+#   - 成功时最后一行输出: ALL E2E CHECKS PASSED
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${ROOT}"
+
+FIX="${ROOT}/testdata/fixtures"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/unparanoia-e2e.XXXXXX")"
+export UNPARANOIA_CONFIG_DIR="${TMP}/config"
+mkdir -p "${UNPARANOIA_CONFIG_DIR}"
+
+cleanup() { rm -rf "${TMP}"; }
+trap cleanup EXIT
+
+PASS=0
+FAIL=0
+pass() { PASS=$((PASS + 1)); printf '  \033[1;32mPASS\033[0m %s\n' "$*"; }
+fail() { FAIL=$((FAIL + 1)); printf '  \033[1;31mFAIL\033[0m %s\n' "$*"; }
+check() { # check <desc> <expected-rc> <actual-rc>
+  if [[ "$3" -eq "$2" ]]; then pass "$1 (exit $3)"; else fail "$1 (exit $3, want $2)"; fi
+}
+contains() { # contains <desc> <file> <literal>
+  if grep -Fq "$3" "$2"; then pass "$1"; else fail "$1: 输出中缺少 [$3]"; fi
+}
+sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
+assert_sha() { # assert_sha <desc> <file> <expected>
+  if [[ -f "$2" ]] && [[ "$(sha_of "$2")" == "$3" ]]; then pass "$1"; else fail "$1 ($2 sha256 不符或缺失)"; fi
+}
+
+HELLO_SHA="925437cc5ee4b09f5d88252076e9e10ae43d26e17fc663926fce402e99054bb2"
+README_SHA="a1509b4ed644139a21bcb890107b4a5262eb5da26e9848c990e0e0891d0f2b52"
+
+# ---- 前置 ---------------------------------------------------------------
+echo "== 准备: fixture 与 CLI"
+if [[ ! -f "${FIX}/sample.enc" ]]; then
+  echo "  testdata/fixtures 缺失，运行 scripts/make-fixtures.sh ..."
+  "${ROOT}/scripts/make-fixtures.sh" >/dev/null || {
+    echo "make-fixtures.sh 失败：e2e 需要 macOS + binaries/mac/7zz" >&2
+    exit 2
+  }
+fi
+for f in sample.enc nested.enc normal.zip encrypted.7z encrypted-inner.7z masked.mp4 layered.enc; do
+  [[ -f "${FIX}/${f}" ]] || { echo "缺少 fixture ${f}" >&2; exit 2; }
+done
+
+cargo build -q -p unparanoia-cli --bin unparanoia-cli
+CLI="${ROOT}/target/debug/unparanoia-cli"
+[[ -x "${CLI}" ]] || { echo "CLI 未构建: ${CLI}" >&2; exit 2; }
+
+run_cli() { # run_cli <args...>; captures OUT/ERR/RC
+  set +e
+  OUT="$("${CLI}" "$@" 2>"${TMP}/stderr.txt")"
+  RC=$?
+  set -e
+  ERR="$(cat "${TMP}/stderr.txt")"
+}
+RESET_CONFIG() { rm -rf "${UNPARANOIA_CONFIG_DIR}"; mkdir -p "${UNPARANOIA_CONFIG_DIR}"; }
+
+echo
+echo "== 1. 基础命令"
+run_cli --version
+check "--version" 0 "${RC}"
+if [[ "${OUT}" == *"0.3.0"* ]]; then pass "--version 含 0.3.0"; else fail "--version 不含 0.3.0: ${OUT}"; fi
+
+RESET_CONFIG
+run_cli doctor
+check "doctor" 0 "${RC}"
+if [[ "${OUT}" == *"7-Zip"* ]]; then pass "doctor 报告 7-Zip"; else fail "doctor 未报告 7-Zip"; fi
+
+"${CLI}" --help > "${TMP}/help.txt" 2>&1
+check "--help" 0 "$?"
+contains "--help 列出 detect" "${TMP}/help.txt" "detect"
+contains "--help 列出 cleanup-staging" "${TMP}/help.txt" "cleanup-staging"
+
+echo
+echo "== 2. detect / inspect（不写盘）"
+run_cli detect --json "${FIX}/sample.enc"
+check "detect sample.enc" 0 "${RC}"
+printf '%s' "${OUT}" > "${TMP}/detect.json"
+contains "detect JSON kind=ssefe_encrypted" "${TMP}/detect.json" '"kind":"ssefe_encrypted"'
+
+run_cli detect --json "${FIX}/masked.mp4"
+check "detect masked.mp4" 0 "${RC}"
+printf '%s' "${OUT}" > "${TMP}/detect-masked.json"
+contains "detect masked 为 masked_archive" "${TMP}/detect-masked.json" '"kind":"masked_archive"'
+
+run_cli inspect "${FIX}/sample.enc"
+check "inspect sample.enc" 0 "${RC}"
+printf '%s\n%s\n' "${OUT}" "${ERR}" > "${TMP}/inspect.txt"
+contains "inspect magic SSEFE" "${TMP}/inspect.txt" "SSEFE"
+contains "inspect version 4" "${TMP}/inspect.txt" "version"
+contains "inspect custom params" "${TMP}/inspect.txt" "custom params"
+
+echo
+echo "== 3. SSEFE 解密（sample.enc，密码 123）"
+OUTDIR="${TMP}/out-sample"
+run_cli run "${FIX}/sample.enc" -p 123 -o "${OUTDIR}" --no-skip-processed
+check "run sample.enc" 0 "${RC}"
+assert_sha "sample.enc -> hello.txt 内容" "${OUTDIR}/hello.txt" "${HELLO_SHA}"
+if find "${OUTDIR}" -name '.unparanoia-tmp-*' | grep -q .; then fail "sample.enc 残留 staging 目录"; else pass "无 staging 残留"; fi
+
+echo
+echo "== 4. 嵌套级联（nested.enc -> nested.zip -> nested-inner.zip -> hello.txt）"
+OUTDIR="${TMP}/out-nested"
+run_cli run "${FIX}/nested.enc" -p 123 -o "${OUTDIR}" --no-skip-processed
+check "run nested.enc" 0 "${RC}"
+assert_sha "级联解出 hello.txt" "${OUTDIR}/hello.txt" "${HELLO_SHA}"
+
+echo
+echo "== 5. 普通压缩包 / 加密 7z / 前缀 ZIP"
+OUTDIR="${TMP}/out-normal"
+run_cli run "${FIX}/normal.zip" -o "${OUTDIR}" --no-skip-processed
+check "run normal.zip" 0 "${RC}"
+assert_sha "normal smart layout -> normal/hello.txt" "${OUTDIR}/normal/hello.txt" "${HELLO_SHA}"
+assert_sha "normal smart layout -> normal/docs/readme.txt" "${OUTDIR}/normal/docs/readme.txt" "${README_SHA}"
+
+OUTDIR="${TMP}/out-7z"
+run_cli run "${FIX}/encrypted.7z" -p 123 -o "${OUTDIR}" --no-skip-processed
+check "run encrypted.7z" 0 "${RC}"
+assert_sha "encrypted.7z -> encrypted/hello.txt" "${OUTDIR}/encrypted/hello.txt" "${HELLO_SHA}"
+
+OUTDIR="${TMP}/out-masked"
+run_cli run "${FIX}/masked.mp4" -o "${OUTDIR}" --no-skip-processed
+check "run masked.mp4" 0 "${RC}"
+assert_sha "masked.mp4 -> masked/hello.txt" "${OUTDIR}/masked/hello.txt" "${HELLO_SHA}"
+
+echo
+echo "== 6. 口令失败路径"
+RESET_CONFIG
+OUTDIR="${TMP}/out-wrong"
+run_cli run "${FIX}/encrypted.7z" -p wrong -o "${OUTDIR}" --no-skip-processed
+check "错误口令 exit 1" 1 "${RC}"
+printf '%s\n%s\n' "${OUT}" "${ERR}" > "${TMP}/wrong.txt"
+if grep -FqiE '密码|password' "${TMP}/wrong.txt"; then pass "错误口令提示需要密码"; else fail "错误口令未给出密码提示"; fi
+if [[ -e "${OUTDIR}/encrypted/hello.txt" ]]; then fail "错误口令却产出了文件"; else pass "错误口令无产出"; fi
+
+OUTDIR="${TMP}/out-nopw"
+run_cli run "${FIX}/sample.enc" -o "${OUTDIR}" --no-skip-processed
+check "无口令 exit 1" 1 "${RC}"
+if [[ -e "${OUTDIR}/hello.txt" ]]; then fail "无口令却产出了文件"; else pass "无口令无产出"; fi
+
+echo
+echo "== 6b. 逐层多密码（layered.enc：外层 outer，内层 7z 密码 inner）"
+RESET_CONFIG
+OUTDIR="${TMP}/out-layered"
+run_cli run "${FIX}/layered.enc" -p wrong -p outer -p inner -o "${OUTDIR}" --no-skip-processed
+check "layered 多密码 exit 0" 0 "${RC}"
+assert_sha "layered 级联解出 hello.txt" "${OUTDIR}/hello.txt" "${HELLO_SHA}"
+printf '%s\n%s\n' "${OUT}" "${ERR}" > "${TMP}/layered.txt"
+contains "多密码成功给出候选序号警告" "${TMP}/layered.txt" "使用候选密码"
+
+OUTDIR="${TMP}/out-layered-partial"
+run_cli run "${FIX}/layered.enc" -p outer -o "${OUTDIR}" --no-skip-processed
+# v0.3 设计：内层缺密码 = 部分成功（外层内容保留 + warning），不是失败。
+# 这样补密码重试时不必重做外层，也不会产生重复输出。
+check "只给外层密码 exit 0（内层缺密码=部分成功）" 0 "${RC}"
+printf '%s\n%s\n' "${OUT}" "${ERR}" > "${TMP}/layered-partial.txt"
+contains "内层缺密码给出保留外层警告" "${TMP}/layered-partial.txt" "保留外层内容"
+if [[ -e "${OUTDIR}/encrypted-inner.7z" ]]; then pass "保留未解开的内层归档 encrypted-inner.7z"; else fail "内层归档未被保留: $(ls "${OUTDIR}" 2>/dev/null | tr '\n' ' ')"; fi
+if [[ ! -e "${OUTDIR}/hello.txt" ]]; then pass "内层未解开（无 hello.txt）"; else fail "内层缺密码却解出了 hello.txt"; fi
+
+echo
+echo "== 7. --json JSON Lines"
+OUTDIR="${TMP}/out-json"
+run_cli run "${FIX}/sample.enc" -p 123 -o "${OUTDIR}" --no-skip-processed --json
+check "run --json" 0 "${RC}"
+printf '%s\n' "${OUT}" > "${TMP}/jsonl.txt"
+contains "JSONL 含 task_detected" "${TMP}/jsonl.txt" '"type":"task_detected"'
+contains "JSONL 含 task_finished" "${TMP}/jsonl.txt" '"type":"task_finished"'
+LAST_LINE="$(tail -n 1 "${TMP}/jsonl.txt")"
+if [[ "${LAST_LINE}" == *'"type":"summary"'* ]]; then pass "最后一行是 summary"; else fail "最后一行不是 summary: ${LAST_LINE}"; fi
+if command -v python3 >/dev/null 2>&1; then
+  if python3 - "${TMP}/jsonl.txt" <<'PY'
+import json, sys
+for line in open(sys.argv[1], encoding="utf-8"):
+    line = line.strip()
+    if line:
+        json.loads(line)
+PY
+  then pass "所有 JSONL 行可解析"; else fail "存在无法解析的 JSONL 行"; fi
+else
+  echo "  SKIP python3 不可用，跳过 JSONL 逐行解析"
+fi
+
+echo
+echo "== 8. --dry-run / conflict / layout"
+OUTDIR="${TMP}/out-dry"
+run_cli run "${FIX}/normal.zip" -o "${OUTDIR}" --dry-run --no-skip-processed
+check "dry-run exit 0" 0 "${RC}"
+if [[ -d "${OUTDIR}" ]] && find "${OUTDIR}" -type f | grep -q .; then fail "dry-run 写入了文件"; else pass "dry-run 未写文件"; fi
+
+OUTDIR="${TMP}/out-rename"
+run_cli run "${FIX}/sample.enc" -p 123 -o "${OUTDIR}" --no-skip-processed
+run_cli run "${FIX}/sample.enc" -p 123 -o "${OUTDIR}" --no-skip-processed --conflict rename
+check "重复解压 rename" 0 "${RC}"
+if [[ -f "${OUTDIR}/hello.txt" && -f "${OUTDIR}/hello (1).txt" ]]; then pass "conflict rename 生成 hello (1).txt"; else fail "conflict rename 未生成 hello (1).txt: $(ls "${OUTDIR}" 2>/dev/null | tr '\n' ' ')"; fi
+
+OUTDIR="${TMP}/out-folder"
+run_cli run "${FIX}/sample.enc" -p 123 -o "${OUTDIR}" --layout folder --no-skip-processed
+check "layout folder" 0 "${RC}"
+assert_sha "layout folder -> sample/hello.txt" "${OUTDIR}/sample/hello.txt" "${HELLO_SHA}"
+
+echo
+echo "== 9. config / cleanup-staging"
+RESET_CONFIG
+run_cli config --show
+check "config --show" 0 "${RC}"
+run_cli config --set-password 123
+check "config --set-password" 0 "${RC}"
+run_cli config --show
+check "config 保存后 --show" 0 "${RC}"
+printf '%s\n%s\n' "${OUT}" "${ERR}" > "${TMP}/cfg.txt"
+if grep -Fq "已保存" "${TMP}/cfg.txt"; then pass "config 显示已保存"; else fail "config 未显示已保存"; fi
+run_cli config --clear-password
+check "config --clear-password" 0 "${RC}"
+
+# 密码库（v0.3.0）：多密码明文库，GUI/CLI 共用
+RESET_CONFIG
+run_cli config --add-password 123
+check "config --add-password" 0 "${RC}"
+printf '%s\n%s\n' "${OUT}" "${ERR}" > "${TMP}/cfg-add.txt"
+contains "config --add-password 提示已添加" "${TMP}/cfg-add.txt" "已添加密码"
+run_cli config --list-passwords
+check "config --list-passwords" 0 "${RC}"
+if [[ "${OUT}" == *"123"* ]]; then pass "config --list-passwords 输出明文"; else fail "config --list-passwords 未输出 123"; fi
+run_cli config --show
+check "config --show（密码库）" 0 "${RC}"
+printf '%s\n%s\n' "${OUT}" "${ERR}" > "${TMP}/cfg-show.txt"
+contains "config --show 显示密码库数量" "${TMP}/cfg-show.txt" "密码库：1 个"
+if [[ -f "${UNPARANOIA_CONFIG_DIR}/config.json" ]]; then pass "密码库文件已创建"; else fail "密码库文件未创建"; fi
+if [[ "$(stat -f '%Lp' "${UNPARANOIA_CONFIG_DIR}/config.json" 2>/dev/null)" == "600" ]]; then pass "config.json 权限 0600"; else fail "config.json 权限不是 0600"; fi
+
+OUTDIR="${TMP}/out-lib"
+run_cli run "${FIX}/sample.enc" -o "${OUTDIR}" --no-skip-processed
+check "无 -p 时自动使用密码库" 0 "${RC}"
+assert_sha "密码库解出 hello.txt" "${OUTDIR}/hello.txt" "${HELLO_SHA}"
+
+run_cli config --remove-password 0
+check "config --remove-password 0" 0 "${RC}"
+OUT=""; ERR=""
+run_cli config --list-passwords
+check "config --list-passwords（已删空）" 0 "${RC}"
+if [[ -z "${OUT//[[:space:]]/}" ]]; then pass "密码库已为空"; else fail "密码库未清空: ${OUT}"; fi
+run_cli config --clear-passwords
+check "config --clear-passwords" 0 "${RC}"
+printf '%s\n%s\n' "${OUT}" "${ERR}" > "${TMP}/cfg-clear.txt"
+contains "config --clear-passwords 提示已清空" "${TMP}/cfg-clear.txt" "已清空密码库"
+
+STAGE_ROOT="${TMP}/stage"
+mkdir -p "${STAGE_ROOT}"
+touch "${STAGE_ROOT}/.unparanoia-tmp-abc123.zip" "${STAGE_ROOT}/.unparanoia-tmp-def456.zip" "${STAGE_ROOT}/keep.txt"
+run_cli cleanup-staging --root "${STAGE_ROOT}"
+check "cleanup-staging" 0 "${RC}"
+if [[ -e "${STAGE_ROOT}/.unparanoia-tmp-abc123.zip" ]]; then fail "cleanup-staging 未删除残留"; else pass "cleanup-staging 删除残留"; fi
+if [[ -f "${STAGE_ROOT}/keep.txt" ]]; then pass "cleanup-staging 保留非残留文件"; else fail "cleanup-staging 误删 keep.txt"; fi
+
+echo
+echo "== 10. 退出码 2（用法错误）"
+run_cli run "${FIX}/normal.zip" --conflict banana
+check "非法 --conflict 值 exit 2" 2 "${RC}"
+run_cli run --definitely-not-a-flag
+check "未知参数 exit 2" 2 "${RC}"
+
+echo
+if [[ "${FAIL}" -ne 0 ]]; then
+  printf '\033[1;31m%d 项失败 / %d 项通过\033[0m\n' "${FAIL}" "${PASS}" >&2
+  exit 1
+fi
+printf '\n\033[1;32m%d 项检查全部通过\033[0m\n' "${PASS}"
+echo "ALL E2E CHECKS PASSED"

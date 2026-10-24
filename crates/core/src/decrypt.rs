@@ -1,15 +1,19 @@
-//! End-to-end decryption of a single Paranoia v4 AES-256 \`.enc\` file.
+//! End-to-end decryption of a single Paranoia v4 AES-256 `.enc` file.
 //!
 //! Pipeline (all in memory-bounded streaming form):
 //! 1. parse and validate the plaintext 8-byte header + 32-byte salt,
 //! 2. detect the optional PFTEREC1 recovery container and reject it,
 //! 3. derive the keys (Argon2id + HKDF),
-//! 4. decrypt AES-256-CTR checkcode + inner ZIP into a temporary file, validating the
-//!    password checkcode on the first block,
-//! 5. verify the keyed BLAKE3 MAC over \`nonce || header || salt || ciphertext\`,
+//! 4. decrypt AES-256-CTR into a temporary file, validating the password checkcode on the
+//!    first block and stripping it so the temporary file is the bare inner ZIP,
+//! 5. verify the keyed BLAKE3 MAC over `nonce || header || salt || ciphertext`,
 //! 6. extract the inner ZIP into the output directory (temp file + rename per entry).
 //!
 //! Any error path removes the temporary files, so no partial output is ever left behind.
+//!
+//! The v0.2.0 merge also exposes two smaller building blocks used by the batch unpack
+//! engine: [`decrypt_to_archive`] (decrypt only, leave the inner ZIP on disk) and
+//! [`verify_password`] (cheap password probe that does not touch the whole ciphertext).
 
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -48,7 +52,17 @@ pub struct DecryptReport {
     pub bytes_written: u64,
 }
 
-/// Inspect the plaintext header of an \`.enc\` file without decrypting it.
+/// Result of [`decrypt_to_archive`]: the decrypted inner ZIP that still has to be extracted.
+#[derive(Debug, Clone)]
+pub struct DecryptArchiveReport {
+    pub input: PathBuf,
+    /// The decrypted inner ZIP written to the caller-provided path.
+    pub archive: PathBuf,
+    /// Size of the inner ZIP in bytes (the 32-byte checkcode is not part of it).
+    pub archive_bytes: u64,
+}
+
+/// Inspect the plaintext header of an `.enc` file without decrypting it.
 pub fn inspect_file(path: &Path) -> Result<Header, DecryptError> {
     let len = fs::metadata(path)?.len();
     if len < PREFIX_LEN {
@@ -59,7 +73,7 @@ pub fn inspect_file(path: &Path) -> Result<Header, DecryptError> {
     parse_header(&prefix)
 }
 
-/// Validate a file before adding it to the batch list: \`.enc\` extension, regular file,
+/// Validate a file before adding it to the batch list: `.enc` extension, regular file,
 /// readable and a supported Paranoia v4 AES-256 header.
 pub fn validate_input_path(path: &Path) -> Result<Header, AddFileError> {
     let has_enc_extension = path
@@ -89,18 +103,12 @@ pub fn validate_input_path(path: &Path) -> Result<Header, AddFileError> {
     parse_header(&prefix).map_err(AddFileError::from)
 }
 
-/// Decrypt one file. \`progress\` receives (processed ciphertext bytes, total ciphertext bytes).
-pub fn decrypt_file(
-    input: &Path,
-    password: &str,
-    opts: &DecryptOptions,
-    progress: &mut dyn FnMut(u64, u64),
-) -> Result<DecryptReport, DecryptError> {
+/// Parse the header and the trailing recovery marker, and decode the KDF parameters.
+fn read_container(input: &Path) -> Result<(File, Header, crate::format::Argon2Params, u64), DecryptError> {
     let len = fs::metadata(input)?.len();
     if len < MIN_FILE_LEN {
         return Err(DecryptError::TooShort);
     }
-
     let mut file = File::open(input)?;
     let mut prefix = [0u8; HEADER_LEN + SALT_LEN];
     file.read_exact(&mut prefix)?;
@@ -123,15 +131,27 @@ pub fn decrypt_file(
     }
 
     let params = parse_argon2_params(header.custom_params)?;
+    Ok((file, header, params, ciphertext_len))
+}
+
+/// Streaming decryption of checkcode + inner ZIP into `out`.
+///
+/// Validates the password checkcode on the first block and the keyed BLAKE3 MAC after the
+/// whole ciphertext has been consumed. On any error the partially written `out` is removed.
+/// Returns the inner-ZIP byte count (the 32-byte checkcode is validated but not written).
+fn decrypt_stream(
+    input: &Path,
+    password: &str,
+    out: &Path,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<u64, DecryptError> {
+    let (mut file, header, params, ciphertext_len) = read_container(input)?;
     let keys = kdf::derive_keys(password, &header.salt, &params)?;
 
-    fs::create_dir_all(&opts.output_dir)?;
-    let temp_zip = util::unique_temp_path(&opts.output_dir, ".paranoia-enc-decrypt-");
-    let temp_guard = util::TempGuard::new(temp_zip.clone());
-
+    let guard = util::TempGuard::new(out.to_path_buf());
     file.seek(SeekFrom::Start(PREFIX_LEN))?;
     let mut reader = BufReader::with_capacity(CHUNK_SIZE, file.take(ciphertext_len));
-    let mut writer = BufWriter::with_capacity(CHUNK_SIZE, File::create(&temp_zip)?);
+    let mut writer = BufWriter::with_capacity(CHUNK_SIZE, File::create(out)?);
 
     let mut mac = MacAccumulator::new(&keys.auth_key);
     mac.update(&keys.nonce);
@@ -141,20 +161,25 @@ pub fn decrypt_file(
 
     let mut buffer = vec![0u8; CHUNK_SIZE];
     let mut processed: u64 = 0;
-    let mut first_chunk = true;
+    let mut strip_checkcode = true;
     while processed < ciphertext_len {
         let want = std::cmp::min(CHUNK_SIZE as u64, ciphertext_len - processed) as usize;
         reader.read_exact(&mut buffer[..want])?;
         mac.update(&buffer[..want]);
         cipher.apply(&mut buffer[..want]);
-        if first_chunk {
-            // The first 32 plaintext bytes must be the [a-z0-9] checkcode.
-            if !util::is_valid_checkcode(&buffer[..CHECKCODE_LEN]) {
+        let mut offset = 0usize;
+        if strip_checkcode {
+            // The first 32 plaintext bytes are the [a-z0-9] checkcode that guards the
+            // password; everything after it is the inner ZIP. Do not write the checkcode:
+            // the caller wants a bare archive (7-Zip does not tolerate a prefixed ZIP).
+            let checkcode = CHECKCODE_LEN.min(want);
+            if !util::is_valid_checkcode(&buffer[..checkcode]) {
                 return Err(DecryptError::WrongPassword);
             }
-            first_chunk = false;
+            offset = checkcode;
+            strip_checkcode = false;
         }
-        writer.write_all(&buffer[..want])?;
+        writer.write_all(&buffer[offset..want])?;
         processed += want as u64;
         progress(processed, ciphertext_len);
     }
@@ -172,6 +197,70 @@ pub fn decrypt_file(
         return Err(DecryptError::Integrity);
     }
 
+    guard.keep();
+    Ok(ciphertext_len - CHECKCODE_LEN as u64)
+}
+
+/// Decrypt one `.enc` file into its inner ZIP archive without extracting it.
+///
+/// The 32-byte plaintext password checkcode is validated and stripped, so `out_zip` is a
+/// bare ZIP archive (it starts with `PK\x03\x04`) that can be handed directly to 7-Zip.
+/// This is the building block used by the batch engine. The whole ciphertext is authenticated
+/// (MAC) before `Ok` is returned.
+pub fn decrypt_to_archive(
+    input: &Path,
+    password: &str,
+    out_zip: &Path,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<DecryptArchiveReport, DecryptError> {
+    if let Some(parent) = out_zip.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    let archive_bytes = decrypt_stream(input, password, out_zip, progress)?;
+    Ok(DecryptArchiveReport {
+        input: input.to_path_buf(),
+        archive: out_zip.to_path_buf(),
+        archive_bytes,
+    })
+}
+
+/// Cheap password probe: derive the keys and check the 32-byte plaintext checkcode only.
+///
+/// `Ok(())` means the password is correct with overwhelming probability (false positive is
+/// about 36^-32). It does not authenticate the whole ciphertext; global integrity is checked by
+/// [`decrypt_to_archive`] / [`decrypt_file`].
+pub fn verify_password(input: &Path, password: &str) -> Result<(), DecryptError> {
+    let (mut file, header, params, _ciphertext_len) = read_container(input)?;
+    let keys = kdf::derive_keys(password, &header.salt, &params)?;
+    file.seek(SeekFrom::Start(PREFIX_LEN))?;
+    let mut buffer = [0u8; CHECKCODE_LEN];
+    file.read_exact(&mut buffer)?;
+    CtrStream::new(&keys.enc_key, &keys.nonce).apply(&mut buffer);
+    if !util::is_valid_checkcode(&buffer) {
+        return Err(DecryptError::WrongPassword);
+    }
+    Ok(())
+}
+
+/// Decrypt one file. `progress` receives (processed ciphertext bytes, total ciphertext bytes).
+pub fn decrypt_file(
+    input: &Path,
+    password: &str,
+    opts: &DecryptOptions,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<DecryptReport, DecryptError> {
+    let len = fs::metadata(input)?.len();
+    if len < MIN_FILE_LEN {
+        return Err(DecryptError::TooShort);
+    }
+
+    fs::create_dir_all(&opts.output_dir)?;
+    let temp_zip = util::unique_temp_path(&opts.output_dir, ".unparanoia-enc-decrypt-");
+    let temp_guard = util::TempGuard::new(temp_zip.clone());
+
+    decrypt_stream(input, password, &temp_zip, progress)?;
     let extract = zip_extract::extract_zip(&temp_zip, &opts.output_dir, opts.conflict)?;
     drop(temp_guard); // removes the temporary decrypted ZIP
 
@@ -196,7 +285,7 @@ mod tests {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let dir = std::env::temp_dir().join(format!(
-            "paranoia-enc-test-decrypt-{tag}-{}-{nanos}",
+            "unparanoia-enc-test-decrypt-{tag}-{}-{nanos}",
             std::process::id()
         ));
         fs::create_dir_all(&dir).unwrap();
@@ -409,6 +498,120 @@ mod tests {
         bad[0] = b'X';
         fs::write(&bad_magic, &bad).unwrap();
         assert_eq!(validate_input_path(&bad_magic).unwrap_err().kind(), "badMagic");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn decrypt_to_archive_writes_inner_zip() {
+        let dir = temp_dir("archive");
+        let input = dir.join("sample.enc");
+        let bytes = make_enc_file("pw", &test_salt(11), 0x00, &[("hello.txt", b"hello archive")]);
+        fs::write(&input, &bytes).unwrap();
+        let out_zip = dir.join("staging/inner.zip");
+        let mut calls = 0usize;
+        let report = decrypt_to_archive(&input, "pw", &out_zip, &mut |done, total| {
+            assert!(total > 0);
+            assert!(done <= total);
+            calls += 1;
+        })
+        .expect("decrypt to archive");
+        assert!(calls >= 1);
+        assert_eq!(report.archive, out_zip);
+        assert_eq!(report.archive_bytes, bytes.len() as u64 - 40 - 32 - 32);
+        let stored = fs::read(&out_zip).unwrap();
+        assert!(stored.starts_with(b"PK\x03\x04"), "output must be a bare ZIP, got {:?}", &stored[..4]);
+        let mut archive = zip::ZipArchive::new(File::open(&out_zip).unwrap()).unwrap();
+        let mut content = String::new();
+        archive
+            .by_name("hello.txt")
+            .expect("inner entry")
+            .read_to_string(&mut content)
+            .unwrap();
+        assert_eq!(content, "hello archive");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn decrypt_to_archive_removes_partial_output_on_wrong_password() {
+        let dir = temp_dir("archive-wrongpw");
+        let input = dir.join("sample.enc");
+        fs::write(
+            &input,
+            make_enc_file("pw", &test_salt(12), 0x00, &[("a.txt", b"secret")]),
+        )
+        .unwrap();
+        let out_zip = dir.join("partial.zip");
+        let error = decrypt_to_archive(&input, "nope", &out_zip, &mut |_, _| {}).unwrap_err();
+        assert_eq!(error.kind(), "wrongPassword");
+        assert!(!out_zip.exists(), "partial archive must be removed");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn decrypt_to_archive_rejects_tampered_mac_without_leaving_output() {
+        let dir = temp_dir("archive-tamper");
+        let input = dir.join("sample.enc");
+        let mut bytes = make_enc_file("pw", &test_salt(13), 0x00, &[("a.txt", b"long enough payload")]);
+        let offset = 40 + 32 + 2;
+        bytes[offset] ^= 0x5A;
+        fs::write(&input, &bytes).unwrap();
+        let out_zip = dir.join("tampered.zip");
+        let error = decrypt_to_archive(&input, "pw", &out_zip, &mut |_, _| {}).unwrap_err();
+        assert_eq!(error.kind(), "integrity");
+        assert!(!out_zip.exists(), "unauthenticated archive must be removed");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn verify_password_accepts_correct_password_and_rejects_others() {
+        let dir = temp_dir("verifypw");
+        let input = dir.join("sample.enc");
+        let bytes = make_enc_file("correct horse", &test_salt(14), 0x00, &[("a.txt", b"data")]);
+        fs::write(&input, &bytes).unwrap();
+        assert!(verify_password(&input, "correct horse").is_ok());
+        assert_eq!(
+            verify_password(&input, "wrong").unwrap_err().kind(),
+            "wrongPassword"
+        );
+
+        let truncated = dir.join("short.enc");
+        fs::write(&truncated, &bytes[..60]).unwrap();
+        assert_eq!(
+            verify_password(&truncated, "correct horse").unwrap_err().kind(),
+            "tooShort"
+        );
+
+        let bad_magic = dir.join("bad.enc");
+        let mut bad = bytes.clone();
+        bad[0] = b'X';
+        fs::write(&bad_magic, &bad).unwrap();
+        assert_eq!(
+            verify_password(&bad_magic, "correct horse").unwrap_err().kind(),
+            "badMagic"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn verify_password_matches_decrypt_to_archive_password_acceptance() {
+        let dir = temp_dir("verifypw-consistent");
+        let input = dir.join("sample.enc");
+        fs::write(
+            &input,
+            make_enc_file("123", &test_salt(15), 0x00, &[("a.txt", b"data")]),
+        )
+        .unwrap();
+        let out_zip = dir.join("inner.zip");
+        assert_eq!(
+            verify_password(&input, "123").is_ok(),
+            decrypt_to_archive(&input, "123", &out_zip, &mut |_, _| {}).is_ok()
+        );
+        fs::remove_file(&out_zip).unwrap();
+        assert_eq!(
+            verify_password(&input, "456").is_err(),
+            decrypt_to_archive(&input, "456", &out_zip, &mut |_, _| {}).is_err()
+        );
+        assert!(!out_zip.exists());
         fs::remove_dir_all(&dir).unwrap();
     }
 }

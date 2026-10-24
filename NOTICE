@@ -1,0 +1,51 @@
+# NOTICE
+
+Unparanoia（帕罗诺亚解包器）本体
+------------------------------------------------
+Copyright (c) 2026 nanase
+以 MIT License 发布，完整文本见仓库根目录 LICENSE。
+
+随附的第三方程序：7-Zip 25.01
+-----------------------------
+本仓库的以下文件是 Igor Pavlov 发布的 7-Zip 25.01 二进制（2025-08-03 构建），
+未做任何修改：
+
+| 文件 | 大小 (B) | SHA-256 |
+|---|---|---|
+| binaries/mac/7zz | 5,885,696 | 5c2fd36f00a66f7787dcf1badd977d44a02b50063fe5678e1f19ff64797432ed |
+| binaries/win/7z.exe | 575,488 | 4cd7d776c686427226a151789d2d61f0b2ed2c392148cc4e69c0238362fafecf |
+| binaries/win/7z.dll | 1,906,176 | 5bd20fb38499d95c39594f41d4781b6181b3304b7f1f4d06b0182f514e7eaa74 |
+
+7-Zip 的许可证文本随二进制一并分发：`binaries/7z-LICENSE.txt`（以及 Windows 子目录
+中同一份文本的副本 `binaries/win/7z-LICENSE.txt`）。核心条款：
+
+- 7-Zip 主体按 **GNU LGPL v2.1+** 发布（含 unRAR 限制：允许解压 RAR，
+  禁止用其逆向 RAR 压缩算法、禁止用于制作 RAR 兼容压缩器）。
+- 官方许可证页面：https://www.7-zip.org/license.txt
+- 官方下载页：https://www.7-zip.org/download.html
+
+本项目的应用只把 7-Zip 作为**独立子进程**调用（不链接其 liblzma/7z.dll 代码），
+在 Tauri 打包产物中作为资源文件随附，许可证原文随附于资源目录。
+
+来源说明（诚实边界）
+--------------------
+- 上述二进制继承自同作者的 upzip 项目（合并前仓库），本次合并未改动其内容；
+  SHA-256 已在上表记录，可用 `shasum -a 256` 复核。
+- 本机在合并时**无法联网**下载官方 7-Zip 包做逐字节比对；上表哈希是
+  "本仓库中这份文件"的指纹，不等同于对官方 download 的独立验证。
+  如需强来源证明，请从 https://www.7-zip.org/a/7z2501-mac.tar.xz 与
+  https://www.7-zip.org/a/7z2501-x64.exe 重新下载并比对 SHA-256
+  （官方 7z2501-mac.tar.xz / 7z2501-x64.exe 的发布哈希以 7-Zip 官网为准）。
+- 版本自证：`binaries/mac/7zz i` 输出 "7-Zip (z) 25.01 ... 2025-08-03"；
+  Windows PE 版本资源包含 FileVersion/ProductVersion 25.01、Igor Pavlov、
+  "Copyright (c) 1999-2025"。
+- 签名状态：macOS 的 7zz 仅 linker-signed（adhoc），无 Developer ID；
+  Windows 的 7z.exe / 7z.dll 无 Authenticode 签名。这与官方发布的二进制一致
+  （官方也不做代码签名），不是被篡改的证据，但意味着无法用签名做来源校验。
+
+Paranoia 文件格式
+-----------------
+Paranoia File Encryption v4 的文件格式知识来自公开样本分析与官方 Java 实现行为
+的交叉确认（见 docs/FORMAT.md、docs/oracle-report.md）。本项目的解密实现是独立
+的 Rust 代码；独立 Java Oracle（verification/oracle）只在验证时调用官方 Java
+源码（位于仓库外 /tmp 路径），不随产品分发，也不被产品代码链接。

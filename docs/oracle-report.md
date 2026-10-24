@@ -284,6 +284,10 @@ other branches are implemented but were not exercised against synthetic corrupt
 files, and I did not separately verify the official code's ordering beyond the
 relevant read paths. This is a coverage gap, not an observed mismatch.
 
+> 2026-10-24 补注：oracle 的 72 字节 = header+salt+MAC 的最小结构长度；当前 Rust
+> 实现做**完整解密**要求 >= 104 字节（含 32B checkcode，见 `docs/FORMAT.md`
+> 错误判定顺序第 1 条），仅 `inspect` 头部允许 >= 40 字节。两边数值不同不是矛盾。
+
 ### 6.3 v4 only
 
 The samples are format version 4. The official code also supports older format

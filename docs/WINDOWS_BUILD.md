@@ -1,335 +1,119 @@
-# Windows x64 构建与验证记录（WINDOWS_BUILD）
+# Windows 构建（WINDOWS_BUILD）
 
-> 记录日期：2026-10-23（Asia/Shanghai）；2026-10-24 增补 v0.1.1 单文件便携版交叉编译记录（§5.4）。
-> 记录机器：macOS arm64（Apple Silicon），**没有 Windows 机器、没有 Windows 虚拟机、没有 Wine**。
+本项目支持两条 Windows 路线。**macOS 上只能出"便携版 zip"；NSIS 安装包必须在
+真实 Windows 上构建。** 两条路线都没有在真实 Windows 上运行验证过——这是本项目
+当前最大的验证缺口，详见 §5「诚实边界」。
 
-## 0. 结论摘要（先看这里）
-
-| 项目 | 状态 | 证据 |
-|---|---|---|
-| Windows x64 **运行时验证**（真实 Windows 上运行 exe / GUI / 解密样本） | ❌ **未进行，也不可能在本机进行** | 本机无 Windows 环境；交叉编译产物**未被执行过**。本文档不伪造任何 Windows 运行结果。 |
-| Windows x64 **CLI/core 构建** | ✅ 交叉编译成功（macOS 上 `cargo-xwin`） | 产出 `paranoia-enc-cli.exe`（PE32+ x86-64，781,312 B），详见 §4 |
-| Windows x64 **GUI（Tauri）单文件便携 exe 构建** | ✅ 交叉编译成功（macOS 上 `cargo-xwin`，**单文件便携 exe，非安装包**） | v0.1.0 首次 6,886,912 B（§5.2）；v0.1.1 重新编译为 6,905,856 B 单文件便携版（§5.4）。**均未在 Windows 上运行过**，Windows 安装包仍走 CI |
-| Windows x64 **从零构建的权威路径** | ✅ GitHub Actions `windows-latest`（`build.yml`） | 见 §6；CI 在真实 Windows runner 上执行 `cargo test` + `pnpm tauri build --bundles nsis` |
-
-**一句话**：本机能证明的是「CLI 与 GUI 的 Rust 侧代码和依赖都可以交叉编译成 Windows x64 可执行文件」，**不能**证明「它们在 Windows 上能运行、能解密、GUI 窗口能打开、安装包能安装」。后者必须依赖 CI 构建 + 真机验收（§7 提供清单）。
-
-## 1. 本机环境（实测）
-
-```text
-macOS 27.2（Build 26B118），Apple Silicon / arm64
-Xcode Command Line Tools: /Library/Developer/CommandLineTools（Apple clang 21.0.0）
-Rust:
-  - rustup 1.29.1，stable toolchain rustc 1.98.1（aarch64-apple-darwin，已安装 x86_64-pc-windows-msvc target）
-  - Homebrew rust 1.99.0（/opt/homebrew/bin/rustc，sysroot 无 windows target）
-Node.js v26.10.0 / pnpm 11.27.0
-cargo-xwin 0.23.1（xwin subcommand）
-Homebrew LLVM 23.1.3（提供 clang-cl 23.1.3）
-Windows 环境: 无（无 Windows 机器 / 无 VM / 无 Wine）
-```
-
-## 2. 为什么没有「Windows 运行时验证」
-
-本仓库开发机是 macOS arm64：
-
-- 没有 Windows 物理机，也没有安装 Parallels / VMware / UTM 等 Windows 虚拟机；
-- 没有 Wine（`which wine wine64` → not found），无法执行交叉编译出的 `.exe`；
-- Tauri GUI 还需要 Windows WebView2 运行时与桌面会话，macOS 上无法模拟。
-
-因此：**所有 Windows 运行行为（窗口能否打开、拖放是否生效、解密是否正确、安装包能否安装）均未验证**。任何声称「已在 Windows 验证」的说法都不成立。下文只记录构建层面的证据。
-
-## 3. 工具链准备与已知坑
-
-### 3.1 安装步骤（本机实际执行）
+## 1. 路线 A：macOS 交叉编译便携版（本仓库实测可跑通编译）
 
 ```bash
-# LLVM（提供 clang-cl，供 cargo-xwin 作为 MSVC 兼容编译器）——本机已预装 brew llvm
+# 一次性准备
 brew install llvm
-
-# cargo-xwin（MSVC CRT/SDK 由它自动下载并注入链接参数）
 cargo install cargo-xwin
-
-# rustup 的 Windows target（注意：必须是 rustup 的 toolchain）
 rustup target add x86_64-pc-windows-msvc
+export PATH="$HOME/.cargo/bin:$PATH"     # Homebrew 的 rust 默认不带 Windows target
+
+# 构建
+./scripts/build-windows-portable.sh
 ```
 
-### 3.2 ⚠️ 坑 1：Homebrew Rust 没有 Windows target（首次失败）
-
-本机 `which rustc` 首先命中 `/opt/homebrew/bin/rustc`（Homebrew 1.99.0）。首次交叉编译直接失败，**错误原文**：
-
-```text
-error[E0463]: can't find crate for `std`
-  |
-  = note: the `x86_64-pc-windows-msvc` target may not be installed
-  = help: consider downloading the target with `rustup target add x86_64-pc-windows-msvc`
-error: could not compile `xwin-warm` (bin "xwin-warm") due to 1 previous error
-```
-
-原因：Homebrew 的 rustc sysroot 是 `/opt/homebrew/Cellar/rust/1.99.0_1`，其中没有 Windows target；`rustup target add` 只影响 rustup 管理的 toolchain（本机 stable = 1.98.1，已装好该 target）。
-
-**修复方式**（后续所有交叉编译命令都这样执行）：
-
-```bash
-export PATH="$HOME/.cargo/bin:$PATH"   # 让 rustup 的 cargo/rustc 优先
-export RUSTUP_TOOLCHAIN=stable         # 强制使用 rustup stable toolchain
-cargo xwin build --release --target x86_64-pc-windows-msvc -p paranoia-enc-cli
-```
-
-### 3.3 ⚠️ 坑 2：首次运行 cargo-xwin 需要联网下载 MSVC SDK/CRT
-
-首次执行时日志：
-
-```text
-⏬ Downloading MSVC CRT...
-✅ Downloaded MSVC CRT in 59s.
-```
-
-- 缓存位置（macOS）：`~/Library/Caches/cargo-xwin`，实测约 **1.1 GB**；
-- 之后可离线复用；清理后需重新下载；
-- 交叉编译不依赖安装完整 Visual Studio，但 `clang-cl`（brew llvm）必须可用。
-
-## 4. 交叉编译证据：CLI + core → Windows x64
-
-### 4.1 冒烟：任意 crate 能否产出 PE32+
-
-先用一个最小 crate 验证工具链（`/tmp/xwin-warm`）：
-
-```bash
-cd /tmp/xwin-warm   # cargo init 的 hello world
-export PATH="$HOME/.cargo/bin:$PATH" && export RUSTUP_TOOLCHAIN=stable
-cargo xwin build --release --target x86_64-pc-windows-msvc
-```
-
-结果：
-
-```text
-Finished `release` profile [optimized] target(s) in 0.75s
-target/x86_64-pc-windows-msvc/release/xwin-warm.exe: PE32+ executable (console) x86-64, for MS Windows
-（大小 130,560 B）
-```
-
-### 4.2 正式产物：paranoia-enc-cli.exe
-
-```bash
-cd /Users/nanase/DSH/paranoia-enc-decryptor
-export PATH="$HOME/.cargo/bin:$PATH" && export RUSTUP_TOOLCHAIN=stable
-cargo xwin build --release -p paranoia-enc-cli --target x86_64-pc-windows-msvc
-```
-
-结果（完整依赖树交叉编译成功，包含 C 依赖）：
-
-```text
-   Compiling zstd-sys v2.1.2+zstd.1.5.7      # C 代码（zstd），用 clang-cl 交叉编译
-   Compiling blake3 v1.8.7                  # 含 C/汇编实现
-   Compiling paranoia-enc-core v0.1.0
-   Compiling paranoia-enc-cli v0.1.0
-    Finished `release` profile [optimized] target(s) in 12.36s
-```
-
-产物：
-
-```text
--rwxr-xr-x  781312  target/x86_64-pc-windows-msvc/release/paranoia-enc-cli.exe
-file: PE32+ executable (console) x86-64, for MS Windows
-```
-
-导入表（`llvm-objdump -p` 实测，说明运行时依赖）：
-
-```text
-KERNEL32.dll      # Windows 基础 API
-ntdll.dll         # NtReadFile / NtWriteFile 等
-bcryptprimitives.dll  # ProcessPrng（随机数）
-api-ms-win-core-synch-l1-2-0.dll  # WaitOnAddress / WakeByAddress*
-VCRUNTIME140.dll  # C++ 运行时（MSVC 构建的 Rust 程序常规依赖）
-```
-
-> 注意：`VCRUNTIME140.dll` 需要目标机器安装 **Microsoft Visual C++ Redistributable**（绝大多数 Windows 机器已有；CI 的 Windows runner 自带）。这是 MSVC toolchain 的常规依赖，不代表产物异常。
-
-### 4.3 这个证据能说明/不能说明什么
-
-| 能说明 | 不能说明 |
-|---|---|
-| core + CLI 的 Rust 代码与全部第三方依赖（含 C/汇编依赖）可编译为 Windows x64 PE | exe 在 Windows 上能启动 |
-| 交叉编译工具链配置正确、步骤可复现 | 解密结果在 Windows 上与 macOS 一致（未运行） |
-| 无 Windows 专属编译错误（`cfg(windows)` 分支可编译） | GUI 可构建/可运行 |
-
-## 5. Tauri GUI 的 Windows 交叉编译调查
-
-> 结论先行：Tauri v2 GUI 的 **Rust 侧可以交叉编译**（本机实测成功，产出裸 exe，见 §5.2）；但 **Windows 安装包不能**从 macOS 交叉打包（bundle 依赖 Windows 原生工具，见 §5.3），且产物**从未在 Windows 上运行过**。真实可交付的 GUI 构建路径仍然是 CI（§6）+ 真机验收（§7）。
-
-### 5.1 尝试的命令
-
-```bash
-cd gui/src-tauri
-export PATH="$HOME/.cargo/bin:$PATH" && export RUSTUP_TOOLCHAIN=stable
-cargo xwin build --release --target x86_64-pc-windows-msvc
-```
-
-### 5.2 实测结果
-
-实测：**成功（EXIT=0）**。
-
-> 注：本节为 v0.1.0 的首次交叉编译记录（6,886,912 B）；v0.1.1 的重新编译与单文件便携版见 §5.4。
-
-```text
-cd gui/src-tauri
-cargo xwin build --release --target x86_64-pc-windows-msvc
-# ...（编译完整 Tauri / wry / webview2-com 依赖树，约 5 分钟）
-    Finished `release` profile [optimized] target(s) in 4m 58s
-EXIT=0
-```
-
-产物：
-
-```text
--rwxr-xr-x  6,886,912  target/x86_64-pc-windows-msvc/release/paranoia-enc-decryptor.exe
-file: PE32+ executable (GUI) x86-64, for MS Windows
-PE Subsystem: 00000002 (Windows GUI)；含 .rsrc 资源节（0x5698，图标/清单已嵌入）
-```
-
-导入 DLL（`llvm-objdump -p` 实测，节选）：
-
-```text
-kernel32.dll / user32.dll / gdi32.dll / shell32.dll / shlwapi.dll
-ole32.dll / oleaut32.dll / combase.dll（COM）
-comctl32.dll / dwmapi.dll / imm32.dll / advapi32.dll / ntdll.dll
-bcryptprimitives.dll（随机数）
-api-ms-win-crt-*（UCRT）/ api-ms-win-core-synch-l1-2-0.dll / api-ms-win-core-winrt-error-l1-1-0.dll
-```
-
-> 注意：导入表里**没有** `WebView2Loader.dll` —— Tauri 2（webview2-com）把 loader 静态链接进 exe；但**运行时仍要求目标系统安装 WebView2 Runtime**（Windows 10/11 通常预装）。
-
-构建过程中的告警（**非错误**，可忽略）：链接阶段出现大量 LNK4099，例如：
-
-```text
-lld-link: Cannot use debug info for 'libcmt.lib(env_mode.obj)' [LNK4099]
->>> failed to load reference 'D:\a\_work\1\s\binaries\amd64ret\lib\amd64\libcmt.amd64.pdb': No such file or directory
-...
-warning: `paranoia-enc-decryptor` (bin "paranoia-enc-decryptor") generated 1 warning
-```
-
-原因：cargo-xwin 下载的 MSVC 运行库不带 PDB 调试符号，链接器只是无法合并调试信息，**不影响链接与产物**；最终 EXIT=0。
-
-**诚实边界**：本节只有「编译链接成功」这一条证据——没有生成安装包，该 exe 也**从未在 Windows 上启动过**（本机无 Windows/VM/Wine）。
-
-### 5.3 Tauri 打包（bundle）层面的限制
-
-上文 §5.2 已实测「GUI 的 Rust 部分能交叉编译」，但 `pnpm tauri build --bundles nsis` 仍无法在 macOS 上产出 Windows 安装包：Tauri 的打包器需要目标平台原生工具（NSIS `makensis` / WiX / Windows 资源编辑），官方不支持从 macOS 交叉打包 Windows 安装器。因此：
-
-- Windows 安装包**只能**在 Windows 上构建（CI `windows-latest` 或真机）；
-- 本机 `cargo xwin` 只用于回答「GUI 的 Rust 依赖树能否在 Windows target 下编译」这一构建层面的问题。
-
-### 5.4 v0.1.1 单文件便携版 exe（2026-10-24 增补）
-
-目标：交付一个 Windows 上「双击即用」的单文件便携版，不依赖随附 DLL 或资源目录。
-
-#### 尝试 A：静态 CRT（失败，已放弃）
-
-```bash
-cd gui/src-tauri
-export PATH="$HOME/.cargo/bin:$PATH"
-export RUSTUP_TOOLCHAIN=stable
-export RUSTFLAGS="-C target-feature=+crt-static"
-cargo xwin build --release --target x86_64-pc-windows-msvc
-```
-
-链接阶段失败，典型错误（节选）：
-
-```text
-ld.lld: error: undefined symbol: _seh_filter_dll
-ld.lld: error: undefined symbol: _configure_narrow_argv
-ld.lld: error: undefined symbol: _initialize_narrow_environment
-ld.lld: error: undefined symbol: _initialize_onexit_table
-ld.lld: error: undefined symbol: _register_onexit_function
->>> referenced by libwebview2_com_sys-*.rlib(loader_override.obj)
-```
-
-原因：Tauri 2 的 `webview2-com` 在 Windows 上静态链接了 WebView2 loader override，它与静态 CRT 的启动/异常处理符号不兼容；在 `cargo-xwin` 场景下没有低成本修补方式。结论：**放弃静态 CRT，改用默认动态 CRT**。
-
-#### 尝试 B：默认动态 CRT（成功，作为交付方式）
-
-```bash
-cd gui/src-tauri
-export PATH="$HOME/.cargo/bin:$PATH"
-export RUSTUP_TOOLCHAIN=stable
-unset RUSTFLAGS
-cargo xwin build --release --target x86_64-pc-windows-msvc
-# Finished `release` profile [optimized] target(s) in 47.27s（首次全量）；图标重绘后重新编译 48.69s（需先 touch build.rs，见下）
-```
-
-产物与检查：
-
-```text
-gui/src-tauri/target/x86_64-pc-windows-msvc/release/paranoia-enc-decryptor.exe
-  6,905,856 B
-  sha256 1f5a4d0bf809a1c6919359d284f4d9915054b717f89a1edd0d538205a79741e8
-  file: PE32+ executable (GUI) x86-64, for MS Windows
-  PE Subsystem: 00000002 (Windows GUI)；.rsrc 0x5fd0（图标/清单已嵌入）
-  版本资源（UTF-16 扫描）：含 "0.1.1" 与 "Paranoia Decryptor"
-```
-
-> **图标重绘后的重编（交付版数值）**：`tauri-build` 的构建脚本不会因为图标文件内容变化自动重跑，直接 `cargo xwin build` 会保留旧图标。必须先 `touch gui/src-tauri/build.rs` 强制重跑构建脚本再编译；上表数值（6,905,856 B / `.rsrc` 0x5fd0）即该次重编结果，并已用脚本比对确认 exe 内嵌的是新 `.ico` 的 PNG 负载（24/32/48/64/256）。
-
-导入表（`llvm-objdump -p`）：`kernel32/user32/gdi32/shell32/shlwapi/ole32/oleaut32/combase/comctl32/dwmapi/imm32/advapi32/ntdll/bcryptprimitives` + `api-ms-win-crt-*`（UCRT）等系统 DLL；**没有** `VCRUNTIME140.dll`、**没有** `WebView2Loader.dll`。
-
-「便携」的准确含义：
-
-- exe 是**单文件**：Tauri 的静态前端资源（HTML/CSS/JS）与 Rust 后端都在 exe 内，复制到 Windows 即可运行，不需要安装程序或随附目录；
-- 运行时依赖系统组件：Windows 10+ 自带 UCRT；界面需要系统 **WebView2 Runtime**（Windows 11 内置，Windows 10 通常随 Edge/系统更新安装）；
-- 链接告警 `LNK4099 … libcmt.amd64.pdb` 是 cargo-xwin 提供的 CRT 不带 PDB 调试信息所致，不影响产物（最终 EXIT=0）。
-
-一键复现：`./scripts/build-windows-portable.sh`（macOS；内部检查 rustup stable / cargo-xwin / Windows target，并打印路径、大小与 SHA-256）。
-
-**诚实边界**：该 exe 仍未在真实 Windows 上运行过（本机无 Windows/VM/Wine）；「双击即用」与解密结果需真机验收（§7 清单）。
-
-## 6. CI：Windows 从零构建的权威路径
-
-`.github/workflows/build.yml`（与 macOS 同一份 workflow，矩阵构建）：
-
-- runner：`windows-latest`（Windows Server x64，GitHub 托管）；
-- 工具链：pnpm 11 → Node.js 22 → `dtolnay/rust-toolchain@stable`（带 `x86_64-pc-windows-msvc` target）→ `Swatinem/rust-cache`；
-- 步骤：`cargo test --workspace` → CLI 冒烟（`cargo run --release -p paranoia-enc-cli -- --help`）→ `cd gui && pnpm install --frozen-lockfile` → `pnpm tauri build --bundles nsis` → 上传产物；
-- 产物：`paranoia-decryptor-windows-x64` artifact，包含 `gui/src-tauri/target/release/bundle/nsis/*-setup.exe` 与裸 exe；
-- 触发：push 到 main / pull_request / 手动 `workflow_dispatch`（Actions 页面可下载 artifact）。
-
-> 状态说明：本机无远程 Git 仓库（`.git/config` 未配置 remote），因此该 workflow **尚未在 GitHub Actions 上真实跑过**；其 YAML 已通过本地 YAML 解析校验（Ruby Psych）。它是 Windows 构建的设计路径，真实运行结果以首次 CI 执行日志为准。
-
-## 7. 如果你有一台 Windows x64 机器：验收清单
+脚本流程：
+
+1. 检查 `cargo-xwin`、`x86_64-pc-windows-msvc` target、`binaries/win/7z.exe|7z.dll`；
+2. `pnpm --dir gui install --frozen-lockfile` + `pnpm --dir gui build`（前端 dist）；
+3. `touch gui/src-tauri/build.rs`（避免图标/资源缓存导致 tauri-build 不重跑）；
+4. `cargo xwin build --release --target x86_64-pc-windows-msvc -p unparanoia -p unparanoia-cli`；
+5. 组装 `target/windows-portable/Unparanoia-<ver>-win-x64-portable/`：
+   `Unparanoia.exe`（GUI）、`unparanoia-cli.exe`、`7z.exe`、`7z.dll`、
+   `7z-LICENSE.txt`、`README.txt`、`SHA256SUMS`；
+6. 用随附 7zz 打成 `...-portable.zip`，打印 zip 与两个 exe 的大小/SHA-256。
+
+便携包运行要求：Windows 10/11 **x64**；Windows 11 自带 WebView2 Runtime，
+Windows 10 需装 Evergreen Runtime；免安装、无需管理员权限、不写系统目录。
+GUI 会在 exe 同目录找 `7zz.exe/7z.exe`（以及 `binaries/win/7z.exe`），
+所以必须解压整包使用，不能只拷 exe。
+
+首次 `cargo xwin build` 会下载约 1.1 GB 的 MSVC CRT/SDK 到
+`~/Library/Caches/cargo-xwin`；`LNK4099: PDB 'libcmt.pdb' was not found` 之类
+警告可忽略。**不要**给 xwin 加 `-C target-feature=+crt-static`：
+实测会因 webview2-com 的 `_seh_filter_dll` 未定义而链接失败，保持动态 CRT。
+
+## 2. 路线 B：真实 Windows 上构建 NSIS 安装包
+
+前置：Rust stable（MSVC toolchain）+ Visual Studio C++ Build Tools、Node.js >= 20、
+pnpm 11、WebView2 Runtime。
 
 ```powershell
-# 1. 安装依赖：Rust(rustup, MSVC toolchain) + Node.js >= 20 + pnpm + VS Build Tools(C++ 桌面开发)
-# 2. 构建 + 单元测试
-git clone <repo-url>; cd paranoia-enc-decryptor
-cargo test --workspace
-./scripts/build-windows.ps1          # 或: cd gui; pnpm install; pnpm tauri build --bundles nsis
-
-# 3. CLI 端到端（对照 README 的 SHA-256 表）
-copy <sample>\3138.7z.002.enc %TEMP%\sample.enc
-cargo run --release -p paranoia-enc-cli -- -p 123 -o %TEMP%\out %TEMP%\sample.enc
-certutil -hashfile %TEMP%\out\3138.7z.002 SHA256
-# 预期: 46abe32caa76660bc87ef9b52d4699d4129ff4fcd86994ccd80ac365d04ce840
-
-# 4. GUI 手工验收
-#    - 双击 bundle\nsis\*-setup.exe 安装（SmartScreen 需「更多信息 -> 仍要运行」）；或直接运行单文件便携版 exe（§5.4，无需安装）
-#    - 打开「Paranoia 解密工具」：拖放 .enc、多选添加、输入密码 123、默认输出到首文件目录
-#    - 观察逐文件/整体进度、错误提示、冲突策略（rename/overwrite/error）
-#    - 勾选「记住密码」后重启，确认自动填充；点「清除记忆」后重启确认不再填充
-#    - 校验输出 SHA-256 与 README 对照表一致
+.\scripts\build-windows.ps1              # cargo test --workspace + tauri build --bundles nsis
+.\scripts\build-windows.ps1 -SkipTests   # 跳过测试
+.\scripts\build-windows.ps1 -Portable    # 只出 exe（不打包），等价便携版
 ```
 
-Windows 特有检查点：
+产物：
 
-- WebView2 Runtime 是否存在（Windows 10/11 通常预装；GUI 窗口白屏时优先排查）；
-- 安装目录/输出目录的权限与中文路径；
-- 密码存储路径：`%APPDATA%\paranoia-enc-decryptor\config.json`（明文，见 README 风险说明）。
+| 产物 | 路径 |
+|---|---|
+| NSIS 安装包 | `target\release\bundle\nsis\Unparanoia_<ver>_x64-setup.exe` |
+| GUI exe | `target\release\unparanoia.exe` |
+| CLI exe | `target\release\unparanoia-cli.exe` |
 
-## 8. 不可声称的结论（诚实边界）
+Windows 专用 Tauri 配置在 `gui/src-tauri/tauri.windows.conf.json`：
+资源带 `binaries/win/7z.exe`、`7z.dll`、许可证；NSIS 安装界面语言为简体中文 + English。
+安装包会把 7-Zip 放进安装目录的 `binaries/win/`，应用运行时从资源目录解析
+（见 `crates/unpack-core/src/sevenzip.rs` 的 `SevenZip::locate` 查找顺序）。
 
-本文档**不**声称以下内容（因为没有证据）：
+## 3. 从代码到产物的路径（避免旧文档的坑）
 
-- ❌ 「已在 Windows x64 上运行通过」；
-- ❌ 「Windows 安装包已实测可安装」；
-- ❌ 「Windows GUI 功能已验收」；
-- ❌ 「CI workflow 已成功运行过」——本机无 remote，未触发 GitHub Actions。
+- 单 Cargo workspace：`gui/src-tauri` 是成员，**产物在仓库根 `target/`**，
+  旧 v0.1.1 文档里的 `gui/src-tauri/target` 已不存在。
+- `pnpm --dir gui tauri build` 的 `beforeBuildCommand` = `pnpm sync:binaries && pnpm build`，
+  会先把 `binaries/` 同步到 `gui/src-tauri/binaries/`（gitignored 生成物）。
+- 改了图标、`tauri.conf.json` 或 7-Zip 二进制后，`touch gui/src-tauri/build.rs`
+  可强制重跑 tauri-build；否则 Windows 资源段可能是旧的。
 
-有证据的结论只有：**core + CLI 的 Windows x64 交叉编译成功，产物为合法 PE32+；GUI 的 Windows 构建路径为 CI（windows-latest）+ 真机验收清单（§7）。**
+## 4. 已知坑
+
+| 现象 | 原因 / 处理 |
+|---|---|
+| `error: linking with link.exe failed` / 找不到 MSVC | 没装 VS Build Tools，或没用 `cargo xwin` |
+| `undefined symbol: _seh_filter_dll` | 静态 CRT（`+crt-static`）与 webview2-com 冲突；去掉该 RUSTFLAGS |
+| `cargo xwin` 下载卡住 | 首次拉 MSVC SDK 约 1.1 GB，检查网络/代理 |
+| Homebrew rust 找不到 windows target | `rustup target add x86_64-pc-windows-msvc`，并确保 PATH 用 rustup 的 cargo |
+| NSIS 打包失败（在 macOS 上） | 不支持交叉打 NSIS；用便携版 zip，或去真实 Windows 构建 |
+| exe 启动报缺少 WebView2 | Win10 装 Evergreen Runtime；Win11 默认自带 |
+
+## 5. 诚实边界（必须保留）
+
+**已验证**（macOS 主机交叉编译，2026-10-24 16:16，`./scripts/build-windows-portable.sh` exit 0，
+仅有 LNK4099 之类 PDB 警告）：
+
+| 产物 | 大小 (B) | SHA-256 |
+|---|---|---|
+| 便携 zip `target/windows-portable/Unparanoia-0.3.0-win-x64-portable.zip` | 5,855,710 | `8799f0476b5d5247f089071fcbd5a1d75c51f2d8260149c3738e8c06b99df187` |
+| 包内 GUI `Unparanoia.exe` | 10,962,944 | `15df510b5f8ec458748fe2cdb9ac97e7affa516ee69f7dc0c33e2c35918f8086` |
+| 包内 CLI `unparanoia-cli.exe` | 3,584,000 | `34ceb172e448a00f2902046cc57f49a5dc140f43806e3267a335b4c224de0a50` |
+| 包内 `7z.exe` / `7z.dll` / `7z-LICENSE.txt` | 575,488 / 1,906,176 / 6,029 | 与 `binaries/win/` 一致（`4cd7d776…` / `5bd20fb3…` / `99df5a51…`） |
+
+- 两个 exe 均为 PE32+ x86-64（GUI / console）；zip 用 `7zz l` 核对含 7 个文件、
+  1 个目录，zip 内 `SHA256SUMS` 与各文件自洽；
+- 7-Zip 二进制为官方 25.01 x64（PE 版本资源 25.01 / 2025-08-03 / Igor Pavlov，
+  无 Authenticode 签名），哈希见 binaries/README.md；
+- 重建会改变 exe（构建时间）与 zip（内层时间戳）的哈希，以当次记录为准。
+
+**未验证 / 已知环境问题**：
+
+- macOS 侧 DMG 打包在 2026-10-24 曾失败（tauri 只报 `failed to run bundle_dmg.sh`）：
+  根因是 `target/release/bundle/macos/` 残留了被中断构建留下的半成品同名 dmg 与
+  `rw.*.dmg`，`hdiutil convert` 遇目标已存在而失败；清理后重跑成功（v0.3.0 最终
+  构建即如此产出，见 BUILD.md §7 与 VERIFICATION.md §7）。
+  与 Windows 交叉编译无关，Windows 便携包产物不受影响。
+- 未在真实 Windows 上启动 GUI、跑 CLI、加载 WebView2；
+- 未验证 Windows 路径/盘符/中文路径、长路径、UAC、只读目录行为；
+- 未验证 7z.exe 子进程在 Windows 的密码传递（本项目通过 argv/环境变量传密码，
+  同机其他进程理论上可读——Windows 上无有效隔离手段，属于已知风险）；
+- 未验证 NSIS 安装/卸载、开始菜单快捷方式、开机自启；
+- 未做 Authenticode 签名，SmartScreen 会提示"未知发布者"。
+
+首次正式发布前，必须在一台真实 Windows 11 x64 上执行：
+`unparanoia-cli.exe doctor`、真实样本解密、GUI 拖放、安装/卸载各一遍，
+并把结果补进 VERIFICATION.md。

@@ -7,13 +7,13 @@
 //!   PARANOIA_SAMPLE_ENC=/path/to/3138.7z.002.enc
 //!   PARANOIA_SAMPLE_SHA256=46abe32c...
 //!   PARANOIA_SAMPLE_PASSWORD=123
-//!   cargo test -p paranoia-enc-core --test real_sample -- --ignored --nocapture
+//!   cargo test -p unparanoia-core --test real_sample -- --ignored --nocapture
 
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use paranoia_enc_core::{
+use unparanoia_core::{
     decrypt_file, run_batch, BatchOptions, ConflictStrategy, DecryptOptions,
 };
 use sha2::{Digest, Sha256};
@@ -28,7 +28,7 @@ fn temp_dir(tag: &str) -> PathBuf {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let dir = std::env::temp_dir().join(format!(
-        "paranoia-enc-test-sample-{tag}-{}-{nanos}",
+        "unparanoia-enc-test-sample-{tag}-{}-{nanos}",
         std::process::id()
     ));
     fs::create_dir_all(&dir).unwrap();

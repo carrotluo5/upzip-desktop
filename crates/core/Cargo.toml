@@ -1,5 +1,5 @@
 [package]
-name = "paranoia-enc-core"
+name = "unparanoia-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -22,3 +22,13 @@ serde_json = "1"
 
 [dev-dependencies]
 sha2 = "0.10"
+
+[features]
+default = []
+# Test-only helpers that can CREATE Paranoia v4 containers (fixtures). Never enabled in shipped builds.
+testkit = []
+
+[[example]]
+name = "make_enc"
+path = "examples/make_enc.rs"
+required-features = ["testkit"]

@@ -1,10 +1,10 @@
-# paranoia-enc-core — 内部 API 契约（Lead 维护）
+# unparanoia-core — 内部 API 契约（v0.3.0）
 
 本文件是 core crate 与 GUI/CLI 的接口约定。core 的公开 API 一旦写下即视为稳定；GUI 侧按此调用。
 
 ## Crate
 
-- 名称: `paranoia-enc-core` (path: `crates/core`)
+- 名称: `unparanoia-core` (path: `crates/core`)
 - Rust edition 2021, 无 async、无网络、无 GUI 依赖，纯同步逻辑（GUI 在自己的线程里调用）。
 - 所有错误类型实现 `std::error::Error + Display`，并暴露稳定的 `kind() -> &'static str` 供 GUI 本地化。
 
@@ -121,21 +121,50 @@ pub fn default_output_dir(files: &[PathBuf]) -> Option<PathBuf>;
 pub fn resolve_output_dir(files: &[PathBuf], custom: Option<&Path>) -> Option<PathBuf>;
 pub fn run_batch(opts: &BatchOptions, progress: &mut dyn FnMut(BatchProgress)) -> BatchSummary;
 
-// ---- 密码记忆（明文；OS 用户配置目录） ----
+// ---- 密码库（多密码明文；OS 用户配置目录，Unix 0600） ----
 pub mod config {
-    pub fn config_file_path() -> Option<PathBuf>;
-    pub fn load_remembered_password() -> Option<String>;
-    pub fn save_remembered_password(password: &str) -> Result<(), ConfigError>;
+    pub const CONFIG_FILE_NAME: &str = "config.json";
+    pub const CONFIG_DIR_NAME: &str = "unparanoia";
+    pub const LEGACY_CONFIG_DIR_NAME: &str = "paranoia-enc-decryptor";
+
+    pub fn config_dir() -> Result<PathBuf, ConfigError>;        // UNPARANOIA_CONFIG_DIR > PARANOIA_ENC_CONFIG_DIR（旧名回退）> 默认目录
+    pub fn config_file_path() -> Result<PathBuf, ConfigError>;
+    pub fn legacy_config_dir() -> Option<PathBuf>;              // 旧 v0.2.0 目录，仅用于迁移读取
+
+    pub fn load_passwords() -> Result<Vec<String>, ConfigError>; // 去空、去重、保序；缺文件返回空
+    pub fn save_passwords(passwords: &[String]) -> Result<(), ConfigError>;
+    pub fn add_password(password: &str) -> Result<bool, ConfigError>;   // 空串或已存在 => false
+    pub fn remove_password_at(index: usize) -> Result<bool, ConfigError>; // 0 基；越界 => false
+    pub fn clear_passwords() -> Result<(), ConfigError>;         // 删除 config.json（幂等）
+
+    // v0.2.0 兼容 API（源码兼容；底层即上面的密码库）
+    pub fn load_remembered_password() -> Result<Option<String>, ConfigError>; // 返回第一个
+    pub fn save_remembered_password(password: &str) -> Result<(), ConfigError>; // 覆盖为单元素
     pub fn clear_remembered_password() -> Result<(), ConfigError>;
 }
 ```
+
+密码库文件格式（明文）：
+
+```json
+{ "passwords": ["123", "family-share"] }
+```
+
+- 写入是「临时文件 + rename」，Unix 下权限 0600；Windows 没有对应权限位（已知限制）。
+- **迁移**：首次读取时若新 `config.json` 不存在、而旧目录
+  `paranoia-enc-decryptor/config.json` 存在，则读取其中的 `passwords` 与
+  `remembered_password`/`rememberedPassword`（v0.2.0 单值），去重后写入新文件；
+  旧文件不删除、不修改。`legacy_config_dir()` 同时接受旧环境变量
+  `PARANOIA_ENC_CONFIG_DIR` 指向的目录（便于旧脚本/便携包迁移）。
+- GUI 命令 `list_passwords/add_password/remove_password/clear_passwords` 直接映射上述函数；
+  CLI `config --list-passwords/--add-password/--remove-password/--clear-passwords` 同理。
 
 ## DecryptError（kind 字符串）
 
 ```rust
 pub enum DecryptError {
     Io(std::io::Error),               // kind: "io"
-    TooShort,                         // "tooShort"       文件过短/被截断（< 72 字节）
+    TooShort,                         // "tooShort"       文件过短/被截断（完整解密 < 104 字节；inspect 仅需 >= 40）
     Truncated,                        // "truncated"      密文长度与头部声明不符 / 被截断
     BadMagic,                         // "badMagic"       不是 SSEFE 文件
     UnsupportedVersion(u8),           // "unsupportedVersion"
@@ -152,18 +181,34 @@ pub enum DecryptError {
 pub enum AddFileError { NotEncExtension, CannotRead(std::io::Error), TooShort, BadMagic, UnsupportedVersion(u8), UnsupportedAlgorithm(u8), InvalidCustomParams(u8) }
 ```
 
-## CLI（crates/cli，仅供验证/无头用途）
+## CLI（crates/cli，完整用法见 README / `--help`）
 
-```
-paranoia-enc-cli [OPTIONS] <FILES>...
-  -p, --password <PASSWORD>       必填（除非 --inspect/--config）
-  -o, --output-dir <DIR>          缺省 = 首个文件所在目录
-      --conflict <overwrite|rename|error>   默认 rename
-      --json                      输出机器可读结果（JSON 一行）
-      --inspect                   只打印每文件头部信息
-      --config-path               打印密码存储路径
-      --clear-password            清除记忆密码
-      命令形式: config show | config clear
+v0.3.0 起 CLI 是产品的一部分（不再只是验证工具），bin 名为 `unparanoia-cli`，子命令：
+
+```text
+unparanoia-cli [FILES...]            等价于 run（兼容旧用法）
+unparanoia-cli run [PATH...]         批量解密/解压
+unparanoia-cli detect PATH...        只识别（可 --json，输出 Detection）
+unparanoia-cli inspect FILE...       打印 SSEFE 头信息
+unparanoia-cli config [--show|--path|--list-passwords|--add-password PW|
+                       --remove-password IDX|--clear-passwords|
+                       --set-password PW|--clear-password]
+unparanoia-cli doctor                7-Zip/配置目录/自检
+unparanoia-cli cleanup-staging [--root DIR]...
 ```
 
-退出码: 0=全部成功；1=存在失败文件；2=参数/IO 错误。
+`config` 说明：`--list-passwords` 逐条打印密码库（默认掩码，具体格式以 `--help` 为准）；
+`--add-password` 追加、`--remove-password INDEX` 删除 0 基索引、`--clear-passwords` 清空；
+`--set-password`/`--clear-password` 是 v0.2.0 单密码用法，保留兼容（单密码即覆盖为一项/清空）。
+
+兼容用法（不写子命令的位置参数形式）在 v0.3.0 仍可用；与 v0.1.1 的差异是
+它也会读取 config.json 的密码库（旧版只认 `-p`/环境变量）。
+
+`run` 主要选项：`-p/--password`（可重复）、`-o/--output-dir`、`-j/--jobs`、
+`--conflict rename|skip|overwrite`、`--layout smart|folder|direct`、`--no-recursive`、
+`--no-nested`、`--max-depth 1-8`、`--keep-broken`、`--dry-run`、`--force-documents`、
+`--allow-execute-sfx`、`--stop-on-error`、`--no-skip-processed`、`--no-strip-junk`、
+`--try-empty-password`、`--json`、`--sevenzip PATH`。
+
+退出码: 0=全部成功/跳过；1=存在失败或需要密码；2=用法/配置/环境错误；130=被中断。
+`--json` 输出纯 JSON Lines（若干 TaskEvent + 末行 `{"type":"summary",...}`）。

@@ -64,13 +64,22 @@ L = 文件总长。样本 L=60527110 / 209779415。无任何额外字段；不�
 
 ## 错误判定顺序（实现约定）
 
-1. 长度 < 72 => tooShort/truncated
+以下顺序对应 `crates/core/src/decrypt.rs` 的实际代码路径（`read_container` 等）：
+
+1. 长度 < 104（8 header + 32 salt + 32 checkcode + 32 MAC，`decrypt.rs:34` 的
+   `MIN_FILE_LEN`）=> tooShort。仅 `inspect` 头部只需 >= 40 字节（header+salt）。
+   （旧文档写的 72 是"header+salt+MAC"、漏了 checkcode，已按代码更正。）
 2. magic != "SSEFE" => badMagic
 3. version != 4 => unsupportedVersion
 4. algorithm != 0 => unsupportedAlgorithm
-5. customParams 超出本实现安全上限（tm>6 或 mm>6，见上文） => invalidCustomParams
+5. 恢复容器魔数（PFTEREC1，位于 MAC 前 8 字节）=> unsupportedRecovery
+   （代码在解析 customParams 之前就探测恢复容器）
+6. customParams 超出本实现安全上限（tm>6 或 mm>6，见上文） => invalidCustomParams
    （格式本身允许该字节，官方实现会接受；这是防止 OOM 的实现护栏）
-6. 恢复容器魔数 => unsupportedRecovery
 7. checkcode 非法字符 => wrongPassword
 8. MAC 不匹配 => integrity
 9. ZIP CRC 失败 => zip
+
+注：`DecryptError::Truncated` 的触发条件是"去除 header/salt/MAC 后密文不足 32 字节"，
+但在 `MIN_FILE_LEN = 104` 的检查之后该条件不可能成立，属于当前实现中不可达的分支
+（保留以表达语义；如后续放宽最小长度检查则会被触发）。

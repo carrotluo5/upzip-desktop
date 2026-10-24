@@ -3,6 +3,8 @@
 An independent, **non-Rust** implementation of the Paranoia File Encryption v4
 (AES-256, password mode) container format, used to cross-check the Rust
 implementation in `crates/` and to validate the two provided `.enc` samples.
+The Rust implementation it validates is the one now shipped as **Unparanoia**
+(product name since v0.3.0; the crypto/KDF code is unchanged from v0.2.0).
 
 Built and run on 2026-10-23. **Verdict: both samples fully verified** —
 BLAKE3 keyed MAC matches, checkcode is valid, inner ZIP CRC matches, decrypted

@@ -17,6 +17,14 @@ node_modules/
 .pnpm-store/
 vendor/bundle/
 
+# ---- Generated test fixtures / scratch (make-fixtures.sh output; NEVER commit) ----
+/testdata/
+/tmp/
+
+# ---- Vendored 7-Zip binaries: commit binaries/, never the build-time mirror ----
+!/binaries/win/7z.exe
+gui/src-tauri/binaries/
+
 # ---- Decrypted plaintext outputs / user samples (NEVER commit) ----
 /out/
 /decrypted/
