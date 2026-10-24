@@ -16,7 +16,8 @@ use crate::detect;
 use crate::error::{Result, UpError};
 use crate::layout::{self, MoveStats};
 use crate::processed::ProcessedStore;
-use crate::sevenzip::{PwCheck, SevenZip};
+use crate::sevenzip::{ListResult, PwCheck, SevenZip};
+use crate::split::{self, SplitFamily};
 use crate::ssefe::{self, SsefeError};
 use crate::types::*;
 use crate::util::{fingerprint, free_space, human_bytes, remove_path};
@@ -180,6 +181,8 @@ impl Engine {
         let mut staging_guard = TempGuard(None);
         // Plaintext ZIP produced by SSEFE decryption (removed on every exit path).
         let mut plain_guard = TempGuard(None);
+        // Decrypted split volumes (SSEFE families) live here until landing.
+        let mut volume_guard = TempGuard(None);
         let mut warnings: Vec<String> = Vec::new();
         let mut out = TaskOutcome {
             task_id: id,
@@ -203,8 +206,30 @@ impl Engine {
             bail!(TaskStatus::Cancelled, "已取消");
         }
 
+        // --- split / multi-volume family -------------------------------------
+        // Only the first volume is a valid 7-Zip entry point; 7-Zip locates the
+        // sibling volumes by name in the same folder. run_batch already collapses
+        // families, but a single dropped later volume must still give an
+        // actionable reason — and work when the first volume exists on disk.
+        let split_family = split::discover(path);
+        if let Some(family) = &split_family {
+            if family.missing_first() {
+                bail!(
+                    TaskStatus::Skipped,
+                    format!(
+                        "分卷压缩包：请添加第一卷（.001 / .part1.rar）；期望首卷：{}",
+                        family.expected_first_name()
+                    )
+                );
+            }
+        }
+        let source_path: PathBuf = split_family
+            .as_ref()
+            .and_then(|family| family.first().map(|volume| volume.path.clone()))
+            .unwrap_or_else(|| path.to_path_buf());
+
         // --- skip files that were already processed successfully -------------
-        let fp = fingerprint(path).unwrap_or_default();
+        let fp = fingerprint(&source_path).unwrap_or_default();
         if cfg.skip_processed && !fp.is_empty() {
             let store = self.processed_lock();
             if store.contains(&fp) {
@@ -218,7 +243,7 @@ impl Engine {
             stage: "detect".into(),
             detail: None,
         });
-        let mut det = match detect::detect(&self.sz, path, cancel).await {
+        let mut det = match detect::detect(&self.sz, &source_path, cancel).await {
             Ok(d) => d,
             Err(UpError::Cancelled) => bail!(TaskStatus::Cancelled, "已取消"),
             Err(e) => bail!(TaskStatus::Failed, e.to_string()),
@@ -234,11 +259,61 @@ impl Engine {
             bail!(TaskStatus::Cancelled, "已取消");
         }
 
+        // --- split completeness (plain families; SSEFE is handled below) -----
+        if let Some(family) = &split_family {
+            if det.kind != FileKind::SsefeEncrypted {
+                // A 7z start header knows the logical stream size, hence the
+                // expected volume count, even when 7-Zip cannot list the archive.
+                if family.kind == split::SplitKind::SevenZip {
+                    if let Some(expected) = split::expected_7z_volumes(&source_path) {
+                        let found = family.volume_count() as u32;
+                        if expected > found {
+                            bail!(
+                                TaskStatus::Failed,
+                                format!("分卷压缩包缺少后续卷（找到 {found}/{expected} 卷）")
+                            );
+                        }
+                    }
+                }
+                // zip/rar expose no count before listing: a failed listing plus a
+                // split header is the best signal available.
+                if !det.listing_ok_no_pw && det.password_state != PasswordState::NeedsPassword {
+                    match self.sz.list_split(&source_path, cancel).await {
+                        Ok(Some(partial)) => {
+                            let found = family.volume_count().max(partial.volumes as usize);
+                            bail!(
+                                TaskStatus::Failed,
+                                format!(
+                                    "分卷压缩包缺少后续卷（找到 {found} 卷，无法读取完整分卷信息）"
+                                )
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(UpError::Cancelled) => bail!(TaskStatus::Cancelled, "已取消"),
+                        Err(_) => {}
+                    }
+                }
+                // Detection metadata for families whose header listing failed
+                // (detect.rs covers the happy path).
+                if det.container != family.kind.container() {
+                    det.container = family.kind.container().to_string();
+                    det.format = Some(family.kind.ext().to_string());
+                    det.kind = FileKind::Archive;
+                    det.notes.push(family.describe());
+                    out.detection = Some(det.clone());
+                    emit(TaskEvent::TaskDetected {
+                        id,
+                        detection: det.clone(),
+                    });
+                }
+            }
+        }
+
         let is_ssefe = det.kind == FileKind::SsefeEncrypted;
         let mut read_path: PathBuf = det
             .carved_path
             .clone()
-            .unwrap_or_else(|| path.to_path_buf());
+            .unwrap_or_else(|| source_path.clone());
         let mut chosen: Option<PasswordHit> = None;
         let mut produced: Option<(PathBuf, Vec<PathBuf>)> = None;
 
@@ -355,13 +430,18 @@ impl Engine {
             }
         } else {
             // --- SSEFE (Paranoia File Encryption v4) -------------------------
+            let encrypted_family = split_family.clone().filter(|family| family.encrypted);
             emit(TaskEvent::TaskStage {
                 id,
                 stage: "password".into(),
-                detail: Some("Paranoia File Encryption v4 (SSEFE)".into()),
+                detail: Some(if encrypted_family.is_some() {
+                    "Paranoia File Encryption v4 (SSEFE) 分卷".into()
+                } else {
+                    "Paranoia File Encryption v4 (SSEFE)".into()
+                }),
             });
             let (found, tried) = match self
-                .find_ssefe_password(id, path, &det, cancel, gate, &mut *emit)
+                .find_ssefe_password(id, &source_path, &det, cancel, gate, &mut *emit)
                 .await
             {
                 Ok(v) => v,
@@ -385,91 +465,199 @@ impl Engine {
             chosen = Some(hit.clone());
 
             if !cfg.dry_run {
-                emit(TaskEvent::TaskStage {
-                    id,
-                    stage: "decrypt".into(),
-                    detail: Some("SSEFE v4 解密".into()),
-                });
-                // Put the plaintext temp ZIP next to the output root when that
-                // directory exists; fall back to the system temp dir.
-                let staging_parent: Option<PathBuf> = cfg
+                // Plaintext material goes under a TMP_PREFIX staging folder that
+                // is removed on every exit path (one ZIP or one file per volume).
+                let plain_parent = cfg
                     .output_root
                     .clone()
-                    .or_else(|| path.parent().map(Path::to_path_buf));
-                let staging_parent = staging_parent.filter(|p| p.is_dir());
+                    .or_else(|| path.parent().map(Path::to_path_buf))
+                    .filter(|parent| parent.is_dir())
+                    .unwrap_or_else(std::env::temp_dir);
+                if let Err(e) = fs::create_dir_all(&plain_parent) {
+                    bail!(
+                        TaskStatus::Failed,
+                        format!("无法创建 {}：{e}", plain_parent.display())
+                    );
+                }
                 let mut tried = out.passwords_tried;
-                match self
-                    .decrypt_ssefe_with_retry(
+                if let Some(family) = &encrypted_family {
+                    // Decrypt every volume into one folder; 7-Zip then reads the
+                    // plain first volume and locates its siblings by name.
+                    let volumes_dir = plain_parent
+                        .join(format!("{}{}", crate::TMP_PREFIX, Uuid::new_v4().simple()));
+                    if let Err(e) = fs::create_dir_all(&volumes_dir) {
+                        bail!(
+                            TaskStatus::Failed,
+                            format!("无法创建 {}：{e}", volumes_dir.display())
+                        );
+                    }
+                    volume_guard.set(volumes_dir.clone());
+                    emit(TaskEvent::TaskStage {
                         id,
-                        path,
-                        hit,
-                        staging_parent.as_deref(),
-                        &det,
-                        &mut tried,
+                        stage: "decrypt".into(),
+                        detail: Some(format!(
+                            "SSEFE v4 解密分卷（共 {} 卷）",
+                            family.volume_count()
+                        )),
+                    });
+                    match self
+                        .decrypt_split_family(
+                            id,
+                            family,
+                            &det,
+                            &volumes_dir,
+                            chosen.clone(),
+                            &mut tried,
+                            cancel,
+                            gate,
+                            &mut *emit,
+                        )
+                        .await
+                    {
+                        Ok((hit, plain_first)) => {
+                            out.passwords_tried = hit.tried;
+                            chosen = Some(hit);
+                            read_path = plain_first;
+                        }
+                        Err(SsefeError::Cancelled) => bail!(TaskStatus::Cancelled, "已取消"),
+                        Err(SsefeError::WrongPassword) => {
+                            out.passwords_tried = tried;
+                            emit(TaskEvent::TaskPasswordMissing { id, tried });
+                            bail!(
+                                TaskStatus::NeedsPassword,
+                                format!("Paranoia v4 密码被拒绝：已尝试 {tried} 个候选密码均失败")
+                            );
+                        }
+                        Err(e) => bail!(TaskStatus::Failed, format!("解密失败：{}", e.message())),
+                    }
+                    if family.kind == split::SplitKind::SevenZip {
+                        if let Some(expected) = split::expected_7z_volumes(&read_path) {
+                            let found = family.volume_count() as u32;
+                            if expected > found {
+                                bail!(
+                                    TaskStatus::Failed,
+                                    format!("分卷压缩包缺少后续卷（找到 {found}/{expected} 卷）")
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    emit(TaskEvent::TaskStage {
+                        id,
+                        stage: "decrypt".into(),
+                        detail: Some("SSEFE v4 解密".into()),
+                    });
+                    match self
+                        .decrypt_ssefe_with_retry(
+                            id,
+                            &source_path,
+                            hit,
+                            Some(&plain_parent),
+                            &det,
+                            &mut tried,
+                            cancel,
+                            gate,
+                            &mut *emit,
+                        )
+                        .await
+                    {
+                        Ok((hit, plain)) => {
+                            out.passwords_tried = hit.tried;
+                            chosen = Some(hit);
+                            plain_guard.set(plain.clone());
+                            read_path = plain;
+                        }
+                        Err(SsefeError::Cancelled) => bail!(TaskStatus::Cancelled, "已取消"),
+                        Err(SsefeError::WrongPassword) => {
+                            out.passwords_tried = tried;
+                            emit(TaskEvent::TaskPasswordMissing { id, tried });
+                            bail!(
+                                TaskStatus::NeedsPassword,
+                                format!("Paranoia v4 密码被拒绝：已尝试 {tried} 个候选密码均失败")
+                            );
+                        }
+                        Err(e) => bail!(TaskStatus::Failed, format!("解密失败：{}", e.message())),
+                    }
+                }
+
+                // List the plaintext archive and unlock its (usually different)
+                // content password — real samples use an SSEFE password and a
+                // separate archive password.
+                emit(TaskEvent::TaskStage {
+                    id,
+                    stage: "detect".into(),
+                    detail: Some(if encrypted_family.is_some() {
+                        "解析解密后的内层分卷归档".into()
+                    } else {
+                        "解析解密后的内层 ZIP".into()
+                    }),
+                });
+                match self
+                    .unlock_inner_archive(
+                        id,
+                        &read_path,
+                        &mut det,
+                        &mut chosen,
+                        &mut out.passwords_tried,
                         cancel,
                         gate,
                         &mut *emit,
                     )
                     .await
                 {
-                    Ok((hit, p)) => {
-                        out.passwords_tried = hit.tried;
-                        chosen = Some(hit);
-                        plain_guard.set(p.clone());
-                        read_path = p;
-                    }
-                    Err(SsefeError::Cancelled) => bail!(TaskStatus::Cancelled, "已取消"),
-                    Err(SsefeError::WrongPassword) => {
-                        out.passwords_tried = tried;
-                        emit(TaskEvent::TaskPasswordMissing { id, tried });
-                        bail!(
-                            TaskStatus::NeedsPassword,
-                            format!("Paranoia v4 密码被拒绝：已尝试 {tried} 个候选密码均失败")
-                        );
-                    }
-                    Err(e) => bail!(TaskStatus::Failed, format!("解密失败：{}", e.message())),
-                }
-
-                // Re-list the plaintext inner ZIP: it drives layout, size and
-                // entry counts from now on.
-                emit(TaskEvent::TaskStage {
-                    id,
-                    stage: "detect".into(),
-                    detail: Some("解析解密后的内层 ZIP".into()),
-                });
-                match self.sz.list(&read_path, None, cancel).await {
-                    Ok(l) => {
+                    Ok(Some(list)) => {
                         det.kind = FileKind::Archive;
-                        det.container = "zip".into();
-                        det.format = Some(if l.archive_type.is_empty() {
-                            "zip".to_string()
-                        } else {
-                            l.archive_type.clone()
-                        });
-                        det.total_entries = l.file_count();
-                        det.encrypted_entries = l.encrypted_entries().count();
-                        det.top_level = l.top_level(cfg.strip_junk);
-                        det.total_uncompressed = l.total_uncompressed();
-                        det.quick_entry = l.smallest_encrypted().map(|e| e.raw_path.clone());
-                        det.listing_ok_no_pw = det.encrypted_entries == 0;
-                        det.password_state = if det.encrypted_entries > 0 {
-                            PasswordState::NeedsPassword
-                        } else {
-                            PasswordState::NoPassword
+                        det.container = match &encrypted_family {
+                            Some(family) => family.kind.container().to_string(),
+                            None => "zip".to_string(),
                         };
-                        det.notes
-                            .push("已用 Paranoia v4 明文口令解密为内层 ZIP".into());
+                        if det.format.is_none() {
+                            det.format = Some(match &encrypted_family {
+                                Some(family) => family.kind.ext().to_string(),
+                                None => "zip".to_string(),
+                            });
+                        }
+                        if let Some(family) = &encrypted_family {
+                            det.notes.push(format!(
+                                "已用 Paranoia v4 明文口令解密分卷（{} 卷）",
+                                family.volume_count()
+                            ));
+                            if list.volumes > 0 {
+                                det.notes.push(format!("7-Zip 报告 {} 卷", list.volumes));
+                            }
+                        } else {
+                            det.notes
+                                .push("已用 Paranoia v4 明文口令解密为内层 ZIP".into());
+                        }
                         out.detection = Some(det.clone());
                         emit(TaskEvent::TaskDetected {
                             id,
                             detection: det.clone(),
                         });
                     }
+                    Ok(None) => {
+                        let tried = out.passwords_tried;
+                        bail!(
+                            TaskStatus::NeedsPassword,
+                            format!("解密成功，但内层压缩包需要密码（已尝试 {tried} 个候选）")
+                        );
+                    }
                     Err(UpError::Cancelled) => bail!(TaskStatus::Cancelled, "已取消"),
-                    Err(e) => bail!(
-                        TaskStatus::Failed,
-                        format!("解密成功，但无法读取内层 ZIP：{e}")
-                    ),
+                    Err(e) => {
+                        if let Some(family) = &encrypted_family {
+                            bail!(
+                                TaskStatus::Failed,
+                                format!(
+                                    "分卷压缩包缺少后续卷或已损坏（找到 {} 卷）：{e}",
+                                    family.volume_count()
+                                )
+                            );
+                        }
+                        bail!(
+                            TaskStatus::Failed,
+                            format!("解密成功，但无法读取内层 ZIP：{e}")
+                        );
+                    }
                 }
             }
         }
@@ -596,18 +784,31 @@ impl Engine {
                 let mut entries: Vec<PathBuf> = fs::read_dir(&staging)
                     .map(|rd| rd.flatten().map(|e| e.path()).collect())
                     .unwrap_or_default();
-                if entries.len() != 1 {
+                entries.sort();
+                // A split family is one logical archive even though it is several
+                // files on disk; 7-Zip only needs the first volume.
+                let family = split::family_from_entries(&entries);
+                let inner_paths: Vec<PathBuf> = match &family {
+                    Some(family) => family.volumes.iter().map(|v| v.path.clone()).collect(),
+                    None => {
+                        if entries.len() != 1 || !entries[0].is_file() {
+                            break;
+                        }
+                        vec![entries[0].clone()]
+                    }
+                };
+                let probe_path = inner_paths[0].clone();
+                if !probe_path.is_file() {
                     break;
                 }
-                let inner = entries.pop().unwrap();
-                if !inner.is_file() {
-                    break;
-                }
-                let inner_name = inner
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let det_inner = match detect::detect(&self.sz, &inner, cancel).await {
+                let inner_name = match &family {
+                    Some(family) => family.describe(),
+                    None => probe_path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                };
+                let det_inner = match detect::detect(&self.sz, &probe_path, cancel).await {
                     Ok(d) => d,
                     Err(UpError::Cancelled) => bail!(TaskStatus::Cancelled, "已取消"),
                     Err(_) => break,
@@ -645,17 +846,19 @@ impl Engine {
                 });
 
                 let mut inner_guard = TempGuard(None);
+                let mut volumes_guard = TempGuard(None);
                 let mut read_inner: PathBuf = det_inner
                     .carved_path
                     .clone()
-                    .unwrap_or_else(|| inner.clone());
+                    .unwrap_or_else(|| probe_path.clone());
                 // Candidate accepted for this layer (if any). Every layer rebuilds
                 // the full pool, so an inner archive may use a different password.
                 let mut inner_hit: Option<PasswordHit> = None;
+                let encrypted_family = family.as_ref().filter(|f| f.encrypted);
 
                 if det_inner.kind == FileKind::SsefeEncrypted {
                     let (found, tried) = match self
-                        .find_ssefe_password(id, &inner, &det_inner, cancel, gate, &mut *emit)
+                        .find_ssefe_password(id, &probe_path, &det_inner, cancel, gate, &mut *emit)
                         .await
                     {
                         Ok(v) => v,
@@ -674,43 +877,114 @@ impl Engine {
                         ));
                         break;
                     };
-                    let mut decrypt_tried = hit.tried;
-                    match self
-                        .decrypt_ssefe_with_retry(
-                            id,
-                            &inner,
-                            hit,
-                            Some(&staging),
-                            &det_inner,
-                            &mut decrypt_tried,
-                            cancel,
-                            gate,
-                            &mut *emit,
-                        )
-                        .await
-                    {
-                        Ok((hit, p)) => {
-                            inner_guard.set(p.clone());
-                            read_inner = p;
-                            inner_hit = Some(hit);
+                    if let Some(family) = &encrypted_family {
+                        // Decrypt every inner volume into a temp folder; 7-Zip then
+                        // reads the plain first volume from there.
+                        let volumes_dir = staging.join(format!(
+                            "{}volumes-{}",
+                            crate::TMP_PREFIX,
+                            Uuid::new_v4().simple()
+                        ));
+                        if let Err(e) = fs::create_dir_all(&volumes_dir) {
+                            warnings.push(format!(
+                                "无法创建内层暂存目录 {}：{e}，保留外层内容",
+                                volumes_dir.display()
+                            ));
+                            break;
                         }
-                        Err(SsefeError::Cancelled) => bail!(TaskStatus::Cancelled, "已取消"),
-                        Err(SsefeError::WrongPassword) => {
-                            emit(TaskEvent::TaskPasswordMissing {
+                        volumes_guard.set(volumes_dir.clone());
+                        let mut decrypt_tried = hit.tried;
+                        match self
+                            .decrypt_split_family(
                                 id,
-                                tried: decrypt_tried,
-                            });
-                            warnings.push(format!(
-                                "内层 Paranoia 归档「{inner_name}」密码被拒绝（已尝试 {decrypt_tried} 个候选），保留外层内容"
-                            ));
-                            break;
+                                family,
+                                &det_inner,
+                                &volumes_dir,
+                                Some(hit),
+                                &mut decrypt_tried,
+                                cancel,
+                                gate,
+                                &mut *emit,
+                            )
+                            .await
+                        {
+                            Ok((hit, plain_first)) => {
+                                read_inner = plain_first;
+                                inner_hit = Some(hit);
+                            }
+                            Err(SsefeError::Cancelled) => {
+                                bail!(TaskStatus::Cancelled, "已取消")
+                            }
+                            Err(SsefeError::WrongPassword) => {
+                                emit(TaskEvent::TaskPasswordMissing {
+                                    id,
+                                    tried: decrypt_tried,
+                                });
+                                warnings.push(format!(
+                                    "内层 Paranoia 分卷「{inner_name}」密码被拒绝（已尝试 {decrypt_tried} 个候选），保留外层内容"
+                                ));
+                                break;
+                            }
+                            Err(e) => {
+                                warnings.push(format!(
+                                    "内层 Paranoia 分卷「{inner_name}」解密失败：{}，保留外层内容",
+                                    e.message()
+                                ));
+                                break;
+                            }
                         }
-                        Err(e) => {
-                            warnings.push(format!(
-                                "内层 Paranoia 归档「{inner_name}」解密失败：{}，保留外层内容",
-                                e.message()
-                            ));
-                            break;
+                        if family.kind == split::SplitKind::SevenZip {
+                            if let Some(expected) = split::expected_7z_volumes(&read_inner) {
+                                let found = family.volume_count() as u32;
+                                if expected > found {
+                                    warnings.push(format!(
+                                        "内层分卷「{inner_name}」缺少后续卷（找到 {found}/{expected} 卷），保留外层内容"
+                                    ));
+                                    break;
+                                }
+                            }
+                        }
+                    } else {
+                        let mut decrypt_tried = hit.tried;
+                        match self
+                            .decrypt_ssefe_with_retry(
+                                id,
+                                &probe_path,
+                                hit,
+                                Some(&staging),
+                                &det_inner,
+                                &mut decrypt_tried,
+                                cancel,
+                                gate,
+                                &mut *emit,
+                            )
+                            .await
+                        {
+                            Ok((hit, p)) => {
+                                inner_guard.set(p.clone());
+                                read_inner = p;
+                                inner_hit = Some(hit);
+                            }
+                            Err(SsefeError::Cancelled) => {
+                                bail!(TaskStatus::Cancelled, "已取消")
+                            }
+                            Err(SsefeError::WrongPassword) => {
+                                emit(TaskEvent::TaskPasswordMissing {
+                                    id,
+                                    tried: decrypt_tried,
+                                });
+                                warnings.push(format!(
+                                    "内层 Paranoia 归档「{inner_name}」密码被拒绝（已尝试 {decrypt_tried} 个候选），保留外层内容"
+                                ));
+                                break;
+                            }
+                            Err(e) => {
+                                warnings.push(format!(
+                                    "内层 Paranoia 归档「{inner_name}」解密失败：{}，保留外层内容",
+                                    e.message()
+                                ));
+                                break;
+                            }
                         }
                     }
                 } else if det_inner.password_state == PasswordState::NeedsPassword {
@@ -735,6 +1009,21 @@ impl Engine {
                         break;
                     };
                     inner_hit = Some(hit);
+                }
+
+                // Plain split families must be complete before 7-Zip can read them.
+                if let Some(family) = &family {
+                    if !family.encrypted && family.kind == split::SplitKind::SevenZip {
+                        if let Some(expected) = split::expected_7z_volumes(&read_inner) {
+                            let found = family.volume_count() as u32;
+                            if expected > found {
+                                warnings.push(format!(
+                                    "内层分卷「{inner_name}」缺少后续卷（找到 {found}/{expected} 卷），保留外层内容"
+                                ));
+                                break;
+                            }
+                        }
+                    }
                 }
 
                 let sub = staging.join(format!("{}{}", crate::TMP_PREFIX, Uuid::new_v4().simple()));
@@ -791,7 +1080,11 @@ impl Engine {
                 }
 
                 scrub_staging(&sub, &mut warnings);
-                let _ = fs::remove_file(&inner);
+                // The inner archive (or every volume of the family) is replaced by
+                // its extracted contents.
+                for inner_path in &inner_paths {
+                    let _ = crate::util::remove_path(inner_path);
+                }
                 let mut moved = 0usize;
                 let mut move_failed = false;
                 if let Ok(rd) = fs::read_dir(&sub) {
@@ -1284,6 +1577,282 @@ impl Engine {
             _ => Ok(false),
         }
     }
+
+    /// Decrypt every volume of an SSEFE-encrypted split family into
+    /// `volumes_dir` (plain names keep the volume suffix but lose `.enc`).
+    /// The first candidate accepted by `find_ssefe_password` is used for every
+    /// volume; a volume that still rejects it falls back to the remaining pool.
+    /// Returns the accepted password and the plaintext first volume path.
+    #[allow(clippy::too_many_arguments)]
+    async fn decrypt_split_family(
+        &self,
+        id: u64,
+        family: &SplitFamily,
+        det: &Detection,
+        volumes_dir: &Path,
+        first_hit: Option<PasswordHit>,
+        tried: &mut usize,
+        cancel: &CancelToken,
+        gate: &PauseGate,
+        emit: &mut (dyn FnMut(TaskEvent) + Send),
+    ) -> std::result::Result<(PasswordHit, PathBuf), SsefeError> {
+        let first_volume = family.first().ok_or(SsefeError::Truncated)?;
+        let mut hit = match first_hit {
+            Some(hit) => hit,
+            None => {
+                let (found, tried_now) = self
+                    .find_ssefe_password(id, &first_volume.path, det, cancel, gate, emit)
+                    .await
+                    .map_err(|_| SsefeError::Cancelled)?;
+                *tried = (*tried).max(tried_now);
+                found.ok_or(SsefeError::WrongPassword)?
+            }
+        };
+        let total_bytes = family
+            .volumes
+            .iter()
+            .map(|volume| volume.size)
+            .sum::<u64>()
+            .max(1);
+        let mut done_bytes: u64 = 0;
+        let mut last_percent: i16 = -1;
+        for (index, volume) in family.volumes.iter().enumerate() {
+            if !wait_pause_or_cancel(gate, cancel).await {
+                return Err(SsefeError::Cancelled);
+            }
+            let plain_path = volumes_dir.join(plain_volume_file_name(&volume.path));
+            // Core's decrypt_to_archive wraps the plaintext file in a ZIP; unwrap
+            // it so 7-Zip sees the raw volume next to its siblings.
+            let wrapper_path = volumes_dir.join(format!(
+                "{}{}.zip",
+                crate::TMP_PREFIX,
+                Uuid::new_v4().simple()
+            ));
+            let volume_label = volume
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default();
+            loop {
+                let result = {
+                    let mut on_percent = |percent: u8| {
+                        let overall = (((done_bytes + volume.size * u64::from(percent) / 100)
+                            * 100)
+                            / total_bytes)
+                            .min(100) as u8;
+                        if i16::from(overall) > last_percent {
+                            last_percent = i16::from(overall);
+                            emit(TaskEvent::TaskProgress {
+                                id,
+                                percent: Some(overall),
+                                line: format!(
+                                    "SSEFE v4 解密分卷 {}/{}（{volume_label}）",
+                                    index + 1,
+                                    family.volume_count()
+                                ),
+                            });
+                        }
+                    };
+                    ssefe::decrypt_to_path(
+                        &volume.path,
+                        &hit.password,
+                        &wrapper_path,
+                        cancel,
+                        &mut on_percent,
+                    )
+                    .await
+                };
+                match result {
+                    Ok(()) => {
+                        match self
+                            .unwrap_volume_zip(&wrapper_path, &plain_path, volumes_dir, cancel)
+                            .await
+                        {
+                            Ok(()) => {}
+                            Err(error) => return Err(error),
+                        }
+                        done_bytes += volume.size;
+                        break;
+                    }
+                    Err(SsefeError::Cancelled) => return Err(SsefeError::Cancelled),
+                    Err(SsefeError::WrongPassword) => {
+                        // Volumes normally share one password, but retry the pool
+                        // rather than abort if one rejects it.
+                        let (found, tried_now) = self
+                            .find_ssefe_password(id, &volume.path, det, cancel, gate, emit)
+                            .await
+                            .map_err(|_| SsefeError::Cancelled)?;
+                        *tried = (*tried).max(tried_now);
+                        match found {
+                            Some(next) => hit = next,
+                            None => return Err(SsefeError::WrongPassword),
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        emit(TaskEvent::TaskProgress {
+            id,
+            percent: Some(100),
+            line: "SSEFE v4 分卷解密完成".to_string(),
+        });
+        let plain_first = volumes_dir.join(plain_volume_file_name(&first_volume.path));
+        Ok((hit, plain_first))
+    }
+
+    /// Unwrap the single-entry ZIP produced by `decrypt_to_archive` into the raw
+    /// volume file. Split families need the raw `.001`-style file names on disk
+    /// so 7-Zip can locate the remaining volumes.
+    async fn unwrap_volume_zip(
+        &self,
+        wrapper: &Path,
+        plain_path: &Path,
+        work_dir: &Path,
+        cancel: &CancelToken,
+    ) -> std::result::Result<(), SsefeError> {
+        let _guard = TempGuard(Some(wrapper.to_path_buf()));
+        let sub = work_dir.join(format!(
+            "{}unwrap-{}",
+            crate::TMP_PREFIX,
+            Uuid::new_v4().simple()
+        ));
+        if let Err(error) = fs::create_dir_all(&sub) {
+            let _ = remove_path(&sub);
+            return Err(SsefeError::Io(format!(
+                "无法创建 {}：{error}",
+                sub.display()
+            )));
+        }
+        let extracted = self
+            .sz
+            .extract(wrapper, None, &sub, cancel, &mut |_| {})
+            .await;
+        match extracted {
+            Ok(_) => {}
+            Err(UpError::Cancelled) => {
+                let _ = remove_path(&sub);
+                return Err(SsefeError::Cancelled);
+            }
+            Err(error) => {
+                let _ = remove_path(&sub);
+                return Err(SsefeError::Other(format!(
+                    "无法解析解密后的分卷 {}：{error}",
+                    wrapper.display()
+                )));
+            }
+        }
+        let mut entries: Vec<PathBuf> = fs::read_dir(&sub)
+            .map(|rd| rd.flatten().map(|entry| entry.path()).collect())
+            .unwrap_or_default();
+        entries.sort();
+        if entries.len() != 1 {
+            let count = entries.len();
+            let _ = remove_path(&sub);
+            return Err(SsefeError::Other(format!(
+                "解密后的分卷 {} 内含 {count} 个条目（预期 1 个）",
+                wrapper.display()
+            )));
+        }
+        let moved = crate::util::move_path(&entries[0], plain_path);
+        let _ = remove_path(&sub);
+        moved.map_err(|error| {
+            SsefeError::Io(format!("无法写入 {}：{error}", plain_path.display()))
+        })
+    }
+
+    /// List the plaintext archive produced by SSEFE decryption and unlock its
+    /// content password when the entries are encrypted. The Paranoia password and
+    /// the archive password are usually different, so every layer rebuilds the
+    /// candidate pool. `Ok(None)` means a password is required and no candidate
+    /// matched.
+    #[allow(clippy::too_many_arguments)]
+    async fn unlock_inner_archive(
+        &self,
+        id: u64,
+        read_path: &Path,
+        det: &mut Detection,
+        chosen: &mut Option<PasswordHit>,
+        passwords_tried: &mut usize,
+        cancel: &CancelToken,
+        gate: &PauseGate,
+        emit: &mut (dyn FnMut(TaskEvent) + Send),
+    ) -> Result<Option<ListResult>> {
+        let list = match self.sz.list(read_path, None, cancel).await {
+            Ok(list) => list,
+            Err(UpError::Cancelled) => return Err(UpError::Cancelled),
+            Err(UpError::PasswordRequired) => {
+                let (found, tried) = self
+                    .find_7z_password(id, read_path, det, cancel, gate, emit)
+                    .await?;
+                *passwords_tried = (*passwords_tried).max(tried);
+                match found {
+                    Some(hit) => {
+                        *chosen = Some(hit.clone());
+                        match self.sz.list(read_path, Some(&hit.password), cancel).await {
+                            Ok(list) => list,
+                            Err(UpError::Cancelled) => return Err(UpError::Cancelled),
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    None => {
+                        emit(TaskEvent::TaskPasswordMissing { id, tried });
+                        return Ok(None);
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        det.format = Some(if list.archive_type.is_empty() {
+            det.format.clone().unwrap_or_else(|| "zip".to_string())
+        } else {
+            list.archive_type.clone()
+        });
+        det.total_entries = list.file_count();
+        det.encrypted_entries = list.encrypted_entries().count();
+        det.top_level = list.top_level(self.cfg.strip_junk);
+        det.total_uncompressed = list.total_uncompressed();
+        det.quick_entry = list
+            .smallest_encrypted()
+            .map(|entry| entry.raw_path.clone());
+        det.password_state = if det.encrypted_entries > 0 {
+            PasswordState::NeedsPassword
+        } else {
+            PasswordState::NoPassword
+        };
+        det.listing_ok_no_pw = det.encrypted_entries == 0;
+        if det.encrypted_entries > 0 {
+            emit(TaskEvent::TaskStage {
+                id,
+                stage: "password".into(),
+                detail: Some("内层压缩包需要密码".into()),
+            });
+            let (found, tried) = self
+                .find_7z_password(id, read_path, det, cancel, gate, emit)
+                .await?;
+            *passwords_tried = (*passwords_tried).max(tried);
+            match found {
+                Some(hit) => *chosen = Some(hit),
+                None => {
+                    emit(TaskEvent::TaskPasswordMissing { id, tried });
+                    return Ok(None);
+                }
+            }
+        }
+        Ok(Some(list))
+    }
+}
+
+/// File name of a decrypted volume: strip the SSEFE `.enc` suffix.
+fn plain_volume_file_name(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    match name.strip_suffix(".enc") {
+        Some(stripped) => stripped.to_string(),
+        None => name,
+    }
 }
 
 /// Reject dangerous entries a malicious archive may have created: symlinks and
@@ -1478,5 +2047,345 @@ mod tests {
             non_first_candidate_warning(&hit(4)).as_deref(),
             Some("使用候选密码 #4 成功")
         );
+    }
+
+    #[tokio::test]
+    async fn non_first_volume_is_skipped_with_hint() {
+        let dir = std::env::temp_dir().join(format!(
+            "unparanoia-split-skip-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let only = dir.join("sample.7z.002");
+        std::fs::write(&only, b"not a real volume").unwrap();
+        let engine = Engine::new(
+            SevenZip::new(PathBuf::from("/nonexistent-7zz")),
+            RunConfig::default(),
+        );
+        let outcome = engine
+            .process_file(
+                1,
+                &only,
+                &CancelToken::new(),
+                &PauseGate::new(),
+                &mut |_| {},
+            )
+            .await;
+        assert_eq!(outcome.status, Some(TaskStatus::Skipped));
+        let reason = outcome.reason.unwrap_or_default();
+        assert!(reason.contains("请添加第一卷"), "reason: {reason}");
+        assert!(reason.contains("sample.7z.001"), "reason: {reason}");
+
+        // The same hint must name the encrypted first volume.
+        let only_enc = dir.join("sample.7z.002.enc");
+        std::fs::write(&only_enc, b"not a real volume").unwrap();
+        let outcome = engine
+            .process_file(
+                2,
+                &only_enc,
+                &CancelToken::new(),
+                &PauseGate::new(),
+                &mut |_| {},
+            )
+            .await;
+        assert_eq!(outcome.status, Some(TaskStatus::Skipped));
+        let reason = outcome.reason.unwrap_or_default();
+        assert!(reason.contains("请添加第一卷"), "reason: {reason}");
+        assert!(reason.contains("sample.7z.001.enc"), "reason: {reason}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// End-to-end: a synthetic `7zz a -v1m` split 7z archive is handed to the
+    /// engine as its first volume and must extract through the normal pipeline.
+    #[tokio::test]
+    async fn split_archive_extracts_through_first_volume() {
+        let Ok(seven_zip) = SevenZip::locate(None) else {
+            eprintln!("7-Zip not available; skipping split extraction test");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "unparanoia-split-e2e-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let payload = vec![0x5Au8; 3 * 1024 * 1024];
+        std::fs::write(dir.join("big.bin"), &payload).unwrap();
+        let status = std::process::Command::new(&seven_zip.exe)
+            .args(["a", "-t7z", "-mx=0", "-v1m", "big.7z", "big.bin"])
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "7zz failed to build split fixture");
+        let first = dir.join("big.7z.001");
+        assert!(first.exists());
+        assert!(dir.join("big.7z.002").exists());
+
+        let out_root = dir.join("out");
+        std::fs::create_dir_all(&out_root).unwrap();
+        let mut cfg = RunConfig::default();
+        cfg.output_root = Some(out_root.clone());
+        cfg.jobs = 1;
+        cfg.nested = false;
+        cfg.skip_processed = false;
+        cfg.passwords = vec!["123".into()];
+        cfg.processed_path = Some(dir.join("processed.json"));
+        let engine = Engine::new(seven_zip, cfg);
+        let outcome = engine
+            .process_file(
+                1,
+                &first,
+                &CancelToken::new(),
+                &PauseGate::new(),
+                &mut |_| {},
+            )
+            .await;
+        assert_eq!(
+            outcome.status,
+            Some(TaskStatus::Success),
+            "reason: {:?} warnings: {:?}",
+            outcome.reason,
+            outcome.warnings
+        );
+        let extracted = out_root.join("big.bin");
+        assert!(
+            extracted.exists(),
+            "payload missing; dest = {:?}",
+            outcome.dest
+        );
+        assert_eq!(
+            std::fs::metadata(&extracted).unwrap().len(),
+            payload.len() as u64
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Missing later volumes must produce a clear Chinese reason (not a generic
+    /// "corrupt archive" failure).
+    #[tokio::test]
+    async fn missing_split_volume_reports_clear_reason() {
+        let Ok(seven_zip) = SevenZip::locate(None) else {
+            eprintln!("7-Zip not available; skipping missing-volume test");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "unparanoia-split-missing-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("big.bin"), vec![0x33u8; 3 * 1024 * 1024]).unwrap();
+        let status = std::process::Command::new(&seven_zip.exe)
+            .args(["a", "-t7z", "-mx=0", "-v1m", "big.7z", "big.bin"])
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let mut volumes: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().starts_with("big.7z."))
+                    .unwrap_or(false)
+            })
+            .collect();
+        volumes.sort();
+        assert!(volumes.len() >= 2);
+        // Keep only the first volume: the rest are missing.
+        for extra in &volumes[1..] {
+            std::fs::remove_file(extra).unwrap();
+        }
+        let first = volumes[0].clone();
+        let out_root = dir.join("out");
+        std::fs::create_dir_all(&out_root).unwrap();
+        let mut cfg = RunConfig::default();
+        cfg.output_root = Some(out_root.clone());
+        cfg.jobs = 1;
+        cfg.nested = false;
+        cfg.skip_processed = false;
+        cfg.processed_path = Some(dir.join("processed.json"));
+        let engine = Engine::new(seven_zip, cfg);
+        let outcome = engine
+            .process_file(
+                1,
+                &first,
+                &CancelToken::new(),
+                &PauseGate::new(),
+                &mut |_| {},
+            )
+            .await;
+        assert_eq!(outcome.status, Some(TaskStatus::Failed));
+        let reason = outcome.reason.unwrap_or_default();
+        assert!(reason.contains("缺少后续卷"), "reason: {reason}");
+        assert!(
+            reason.contains(&format!("/{} 卷", volumes.len())),
+            "reason: {reason}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A split family nested inside a normal archive must be cascaded as one
+    /// logical unit (all volumes moved to a common directory before extraction).
+    #[tokio::test]
+    async fn nested_split_family_is_cascaded() {
+        let Ok(seven_zip) = SevenZip::locate(None) else {
+            eprintln!("7-Zip not available; skipping nested split test");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "unparanoia-nested-split-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let payload = vec![0x44u8; 3 * 1024 * 1024];
+        std::fs::write(dir.join("inner.bin"), &payload).unwrap();
+        assert!(
+            std::process::Command::new(&seven_zip.exe)
+                .args(["a", "-t7z", "-mx=0", "-v1m", "inner.7z", "inner.bin"])
+                .current_dir(&dir)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut volumes: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().starts_with("inner.7z."))
+                    .unwrap_or(false)
+            })
+            .collect();
+        volumes.sort();
+        assert!(volumes.len() >= 2);
+        let mut zip_args: Vec<String> = vec!["a".into(), "-tzip".into(), "-mx=0".into(), "outer.zip".into()];
+        for volume in &volumes {
+            zip_args.push(volume.file_name().unwrap().to_string_lossy().to_string());
+        }
+        assert!(
+            std::process::Command::new(&seven_zip.exe)
+                .args(&zip_args)
+                .current_dir(&dir)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let out_root = dir.join("out");
+        std::fs::create_dir_all(&out_root).unwrap();
+        let mut cfg = RunConfig::default();
+        cfg.output_root = Some(out_root.clone());
+        cfg.jobs = 1;
+        cfg.nested = true;
+        cfg.skip_processed = false;
+        cfg.processed_path = Some(dir.join("processed.json"));
+        let engine = Engine::new(seven_zip, cfg);
+        let outcome = engine
+            .process_file(
+                1,
+                &dir.join("outer.zip"),
+                &CancelToken::new(),
+                &PauseGate::new(),
+                &mut |_| {},
+            )
+            .await;
+        assert_eq!(
+            outcome.status,
+            Some(TaskStatus::Success),
+            "reason: {:?}",
+            outcome.reason
+        );
+        let extracted = out_root.join("inner.bin");
+        assert!(extracted.exists(), "missing {:?}", extracted);
+        assert_eq!(std::fs::metadata(&extracted).unwrap().len(), payload.len() as u64);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Real-sample shape: SSEFE-wrapped split volumes (outer password) that hold
+    /// a password-protected 7z family (inner password). Every volume must be
+    /// decrypted and unwrapped to its raw volume name before 7-Zip runs.
+    #[tokio::test]
+    async fn ssefe_split_volumes_are_decrypted_and_extracted() {
+        let Ok(seven_zip) = SevenZip::locate(None) else {
+            eprintln!("7-Zip not available; skipping SSEFE split test");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "unparanoia-ssefe-split-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let payload = vec![0x6bu8; 3 * 1024 * 1024];
+        std::fs::write(dir.join("inner.bin"), &payload).unwrap();
+        assert!(
+            std::process::Command::new(&seven_zip.exe)
+                .args([
+                    "a", "-t7z", "-mx=0", "-v1m", "-pinner-secret", "-mhe=on", "inner.7z",
+                    "inner.bin",
+                ])
+                .current_dir(&dir)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut volumes: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().starts_with("inner.7z."))
+                    .unwrap_or(false)
+            })
+            .collect();
+        volumes.sort();
+        assert!(volumes.len() >= 2, "expected a split family");
+        for volume in &volumes {
+            let name = volume.file_name().unwrap().to_string_lossy().to_string();
+            let encrypted = dir.join(format!("{name}.enc"));
+            unparanoia_core::testkit::write_enc_file(volume, &encrypted, "outer-secret", 0x00)
+                .expect("build SSEFE volume");
+        }
+        for volume in &volumes {
+            std::fs::remove_file(volume).unwrap();
+        }
+        let first = dir.join(format!(
+            "{}.enc",
+            volumes[0].file_name().unwrap().to_string_lossy()
+        ));
+        let out_root = dir.join("out");
+        std::fs::create_dir_all(&out_root).unwrap();
+        let mut cfg = RunConfig::default();
+        cfg.output_root = Some(out_root.clone());
+        cfg.jobs = 1;
+        cfg.nested = false;
+        cfg.skip_processed = false;
+        cfg.passwords = vec!["outer-secret".to_string(), "inner-secret".to_string()];
+        cfg.processed_path = Some(dir.join("processed.json"));
+        let engine = Engine::new(seven_zip, cfg);
+        let outcome = engine
+            .process_file(
+                1,
+                &first,
+                &CancelToken::new(),
+                &PauseGate::new(),
+                &mut |_| {},
+            )
+            .await;
+        assert_eq!(
+            outcome.status,
+            Some(TaskStatus::Success),
+            "reason: {:?} warnings: {:?}",
+            outcome.reason,
+            outcome.warnings
+        );
+        let extracted = out_root.join("inner.bin");
+        assert!(extracted.exists(), "missing {:?}", extracted);
+        assert_eq!(
+            std::fs::metadata(&extracted).unwrap().len(),
+            payload.len() as u64
+        );
+        assert_eq!(outcome.files, 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

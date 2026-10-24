@@ -12,6 +12,7 @@ pub mod queue;
 pub mod settings;
 pub mod sevenzip;
 pub mod sfx;
+pub mod split;
 pub mod ssefe;
 pub mod types;
 pub mod util;
@@ -25,7 +26,7 @@ pub use processed::ProcessedStore;
 pub use queue::{expand_inputs, run_batch, Sink};
 pub use settings::Settings;
 pub use sevenzip::{PasswordMode, PwCheck, SevenZip};
-pub use ssefe::{decrypt_to_temp, enc_probe, SsefeError, SsefeProbe};
+pub use ssefe::{decrypt_to_path, decrypt_to_temp, enc_probe, SsefeError, SsefeProbe};
 pub use types::*;
 
 /// Name prefix of staging folders/files. Cleaned up on the next run by

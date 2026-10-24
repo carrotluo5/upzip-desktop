@@ -4,7 +4,8 @@
 #
 # 在仓库内生成的 fixture 上跑真实 CLI（调用随附 7-Zip），断言:
 #   退出码 / 输出布局 / 文件内容 sha256 / JSON Lines / 密码流程 /
-#   nested 级联 / conflict 策略 / dry-run / cleanup-staging / config。
+#   nested 级联 / conflict 策略 / dry-run / cleanup-staging / config /
+#   分段压缩包（普通分卷、SSEFE .enc 分卷、只给非首卷、缺后续卷）。
 #
 # 用法: ./scripts/e2e-verify.sh
 #   - 需要 testdata/fixtures/（缺失时自动调用 scripts/make-fixtures.sh，需要 macOS + binaries/mac/7zz）
@@ -38,19 +39,24 @@ assert_sha() { # assert_sha <desc> <file> <expected>
   if [[ -f "$2" ]] && [[ "$(sha_of "$2")" == "$3" ]]; then pass "$1"; else fail "$1 ($2 sha256 不符或缺失)"; fi
 }
 
-HELLO_SHA="925437cc5ee4b09f5d88252076e9e10ae43d26e17fc663926fce402e99054bb2"
+HELLO_SHA="6afe9037a89429e0572cd8fd00d2f52af4405647e88c73cb64d0436bb96f491e"
 README_SHA="a1509b4ed644139a21bcb890107b4a5262eb5da26e9848c990e0e0891d0f2b52"
+# 分卷 fixture 的 3 MiB 零填充 blob（内容确定，哈希稳定）
+BLOB_SHA="bbd05cf6097ac9b1f89ea29d2542c1b7b67ee46848393895f5a9e43fa1f621e5"
 
 # ---- 前置 ---------------------------------------------------------------
 echo "== 准备: fixture 与 CLI"
-if [[ ! -f "${FIX}/sample.enc" ]]; then
-  echo "  testdata/fixtures 缺失，运行 scripts/make-fixtures.sh ..."
+REQUIRED_FIXTURES="sample.enc nested.enc normal.zip encrypted.7z encrypted-inner.7z masked.mp4 layered.enc split.7z.001 split.7z.001.enc split.7z.002.enc truncated.7z.001.enc"
+NEED_FIXTURES=0
+for f in ${REQUIRED_FIXTURES}; do [[ -f "${FIX}/${f}" ]] || NEED_FIXTURES=1; done
+if [[ "${NEED_FIXTURES}" -ne 0 ]]; then
+  echo "  testdata/fixtures 缺失（或缺少 v0.3.1 分卷 fixture），运行 scripts/make-fixtures.sh ..."
   "${ROOT}/scripts/make-fixtures.sh" >/dev/null || {
     echo "make-fixtures.sh 失败：e2e 需要 macOS + binaries/mac/7zz" >&2
     exit 2
   }
 fi
-for f in sample.enc nested.enc normal.zip encrypted.7z encrypted-inner.7z masked.mp4 layered.enc; do
+for f in ${REQUIRED_FIXTURES}; do
   [[ -f "${FIX}/${f}" ]] || { echo "缺少 fixture ${f}" >&2; exit 2; }
 done
 
@@ -71,7 +77,7 @@ echo
 echo "== 1. 基础命令"
 run_cli --version
 check "--version" 0 "${RC}"
-if [[ "${OUT}" == *"0.3.0"* ]]; then pass "--version 含 0.3.0"; else fail "--version 不含 0.3.0: ${OUT}"; fi
+if [[ "${OUT}" == *"0.3.1"* ]]; then pass "--version 含 0.3.1"; else fail "--version 不含 0.3.1: ${OUT}"; fi
 
 RESET_CONFIG
 run_cli doctor
@@ -82,6 +88,13 @@ if [[ "${OUT}" == *"7-Zip"* ]]; then pass "doctor 报告 7-Zip"; else fail "doct
 check "--help" 0 "$?"
 contains "--help 列出 detect" "${TMP}/help.txt" "detect"
 contains "--help 列出 cleanup-staging" "${TMP}/help.txt" "cleanup-staging"
+
+# --licenses：v0.3.1 内嵌/随包 7-Zip 的许可证查看
+run_cli --licenses
+check "--licenses" 0 "${RC}"
+printf '%s' "${OUT}" > "${TMP}/licenses.txt"
+contains "--licenses 含 7-Zip 许可证" "${TMP}/licenses.txt" "7-Zip"
+contains "--licenses 含 unRAR 限制" "${TMP}/licenses.txt" "unRAR"
 
 echo
 echo "== 2. detect / inspect（不写盘）"
@@ -266,7 +279,59 @@ if [[ -e "${STAGE_ROOT}/.unparanoia-tmp-abc123.zip" ]]; then fail "cleanup-stagi
 if [[ -f "${STAGE_ROOT}/keep.txt" ]]; then pass "cleanup-staging 保留非残留文件"; else fail "cleanup-staging 误删 keep.txt"; fi
 
 echo
-echo "== 10. 退出码 2（用法错误）"
+echo "== 10. 分卷压缩包（v0.3.1）"
+RESET_CONFIG
+OUTDIR="${TMP}/out-split"
+run_cli run "${FIX}/split.7z.001" -o "${OUTDIR}" --no-skip-processed
+check "普通分卷（只给 .001，7-Zip 自动读同目录其余卷）" 0 "${RC}"
+assert_sha "普通分卷 -> split/hello.txt" "${OUTDIR}/split/hello.txt" "${HELLO_SHA}"
+assert_sha "普通分卷 -> split/blob.bin" "${OUTDIR}/split/blob.bin" "${BLOB_SHA}"
+
+# 只给非首卷：应 Skipped（exit 0）并明确提示需要第一卷，而不是 Failed。
+RESET_CONFIG
+ONLY2="${TMP}/only-second-volume"
+mkdir -p "${ONLY2}"
+cp "${FIX}/split.7z.002.enc" "${ONLY2}/"
+OUTDIR="${TMP}/out-split-only2"
+run_cli run "${ONLY2}/split.7z.002.enc" -o "${OUTDIR}" --no-skip-processed
+check "只给 .002.enc exit 0（跳过）" 0 "${RC}"
+printf '%s\n%s\n' "${OUT}" "${ERR}" > "${TMP}/split-only2.txt"
+contains "只给 .002.enc 提示需要第一卷" "${TMP}/split-only2.txt" "第一卷"
+if [[ -d "${OUTDIR}" ]] && find "${OUTDIR}" -type f | grep -q .; then fail "只给 .002.enc 却产出了文件"; else pass "只给 .002.enc 无产出"; fi
+
+# SSEFE 分卷组：每卷都是独立 .enc 容器；候选密码 wrong 在前、123 在后 -> 第 2 个候选成功。
+# 只显式给 .001/.002 两个卷，其余同族卷由引擎在同目录自动发现。
+RESET_CONFIG
+OUTDIR="${TMP}/out-split-enc"
+run_cli run "${FIX}/split.7z.001.enc" "${FIX}/split.7z.002.enc" -p wrong -p 123 -o "${OUTDIR}" --no-skip-processed --json
+check "SSEFE 分卷组 exit 0" 0 "${RC}"
+printf '%s\n' "${OUT}" > "${TMP}/split-jsonl.txt"
+if python3 - "${TMP}/split-jsonl.txt" <<'PY'
+import json, sys
+events = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+outcomes = [e["outcome"] for e in events if e.get("type") == "task_finished"]
+summaries = [e for e in events if e.get("type") == "summary"]
+assert len(summaries) == 1, summaries
+assert summaries[0]["total"] == 1 and summaries[0]["success"] == 1, summaries[0]
+assert len(outcomes) == 1 and outcomes[0]["files"] == 2, outcomes
+assert outcomes[0]["detection"]["container"] == "7z-volume", outcomes[0]["detection"]
+assert any("使用候选密码" in w for w in outcomes[0]["warnings"]), outcomes[0]["warnings"]
+PY
+then pass "SSEFE 分卷组：合并为 1 个任务、2 个输出、候选 #2 成功"; else fail "SSEFE 分卷组 JSON 断言失败"; fi
+assert_sha "SSEFE 分卷组 -> split/hello.txt" "${OUTDIR}/split/hello.txt" "${HELLO_SHA}"
+assert_sha "SSEFE 分卷组 -> split/blob.bin" "${OUTDIR}/split/blob.bin" "${BLOB_SHA}"
+
+# 缺后续卷：必须明确报错且不留半成品。
+RESET_CONFIG
+OUTDIR="${TMP}/out-split-missing"
+run_cli run "${FIX}/truncated.7z.001.enc" -p 123 -o "${OUTDIR}" --no-skip-processed
+check "缺后续卷 exit 1" 1 "${RC}"
+printf '%s\n%s\n' "${OUT}" "${ERR}" > "${TMP}/split-missing.txt"
+contains "缺后续卷明确报错" "${TMP}/split-missing.txt" "缺少后续卷"
+if [[ -d "${OUTDIR}" ]] && find "${OUTDIR}" -type f | grep -q .; then fail "缺后续卷却产出了半成品"; else pass "缺后续卷无半成品"; fi
+
+echo
+echo "== 11. 退出码 2（用法错误）"
 run_cli run "${FIX}/normal.zip" --conflict banana
 check "非法 --conflict 值 exit 2" 2 "${RC}"
 run_cli run --definitely-not-a-flag

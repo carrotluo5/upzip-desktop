@@ -11,6 +11,7 @@
 //!          [--set-password PW|--clear-password|--clear-passwords]
 //!   doctor [--sevenzip PATH]            environment self-check
 //!   cleanup-staging [--root DIR]...     remove .unparanoia-tmp-* leftovers
+//!   --licenses                          print the embedded 7-Zip license text
 //!
 //! Exit codes: 0 all succeeded/skipped, 1 any failed or needs-password,
 //! 2 usage/config/environment error, 130 cancelled with Ctrl-C.
@@ -30,6 +31,7 @@ use unparanoia_core::config::{
 use unparanoia_core::{
     default_output_dir, inspect_file, parse_argon2_params, BatchSummary, FileOutcome,
 };
+use unparanoia_embedded_7z::{ensure_7z as ensure_embedded_7z, LICENSE_TEXT, SEVEN_ZIP_VERSION};
 use unparanoia_unpack_core::{
     archive_stem, expand_inputs, run_batch, util::human_bytes, CancelToken, ConflictPolicy,
     Detection, Engine, FileKind, LayoutPolicy, PasswordState, PauseGate, ProcessedStore, RunConfig,
@@ -73,6 +75,10 @@ async fn dispatch(args: &[String]) -> i32 {
             println!("unparanoia-cli {}", env!("CARGO_PKG_VERSION"));
             EXIT_OK
         }
+        Some("--licenses") => {
+            print_licenses();
+            EXIT_OK
+        }
         _ => cmd_legacy(args).await,
     }
 }
@@ -93,6 +99,9 @@ fn print_help() {
     println!("  unparanoia-cli cleanup-staging [--root DIR]...");
     println!("                                              清理 .unparanoia-tmp-* 残留");
     println!("  unparanoia-cli --version");
+    println!(
+        "  unparanoia-cli --licenses                 打印内嵌 7-Zip 许可证（LGPL + unRAR 限制）"
+    );
     println!();
     println!("旧式兼容选项：-p/--password、-o/--output-dir、--conflict、--json、--inspect、");
     println!("              --config-path、--clear-password");
@@ -107,6 +116,16 @@ fn print_help() {
     println!("环境变量：UNPARANOIA_PASSWORD（密码；兼容 PARANOIA_ENC_PASSWORD）、");
     println!("          UNPARANOIA_7Z（7-Zip 路径）、UNPARANOIA_CONFIG_DIR（配置目录）");
     println!("各子命令详情：unparanoia-cli <子命令> --help");
+}
+
+fn print_licenses() {
+    println!("内嵌 7-Zip {SEVEN_ZIP_VERSION} 许可证（GNU LGPL 2.1 + unRAR 限制）");
+    println!("Windows 单 exe 发行版把 7z.exe / 7z.dll 打包进程序本身；macOS .app 随包提供 7zz。");
+    println!();
+    print!("{LICENSE_TEXT}");
+    if !LICENSE_TEXT.ends_with('\n') {
+        println!();
+    }
 }
 
 fn argv_for(args: &[String]) -> Vec<String> {
@@ -358,17 +377,125 @@ fn inputs_look_encrypted(inputs: &[PathBuf]) -> bool {
         })
 }
 
+/// Where the resolved 7-Zip executable came from (reported by `doctor`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SevenZipSource {
+    Explicit,
+    Embedded,
+    Environment,
+    External,
+}
+
+impl SevenZipSource {
+    fn label(self) -> &'static str {
+        match self {
+            SevenZipSource::Explicit => "显式 --sevenzip",
+            SevenZipSource::Embedded => "内嵌（Windows 单 exe）",
+            SevenZipSource::Environment => "环境变量",
+            SevenZipSource::External => "外部安装 / 应用目录",
+        }
+    }
+}
+
+struct SevenZipChoice {
+    sevenzip: SevenZip,
+    source: SevenZipSource,
+}
+
 fn build_sevenzip(explicit: Option<PathBuf>) -> Result<SevenZip, i32> {
-    match SevenZip::locate(explicit) {
-        Ok(sevenzip) => Ok(sevenzip),
-        Err(error) => {
-            eprintln!("错误：{error}");
+    resolve_sevenzip(explicit)
+        .map(|choice| choice.sevenzip)
+        .map_err(|message| {
+            eprintln!("错误：{message}");
             eprintln!(
                 "提示：安装 7-Zip 后把 7zz/7z.exe 加入 PATH，或设置环境变量 UNPARANOIA_7Z 指向可执行文件。"
             );
-            Err(EXIT_USAGE)
+            EXIT_USAGE
+        })
+}
+
+/// Resolve 7-Zip in priority order: explicit `--sevenzip` > `UNPARANOIA_7Z` /
+/// `UPZIP_7Z` environment variable (only when it points at an existing file) >
+/// the runtime embedded into the Windows single-file build (no-op on macOS/Linux) >
+/// the regular `SevenZip::locate` automatic search (app dir, bundled binaries/,
+/// PATH, common install dirs).
+fn resolve_sevenzip(explicit: Option<PathBuf>) -> Result<SevenZipChoice, String> {
+    let explicit_path = explicit.clone();
+
+    // 1. An explicit --sevenzip must win without touching the embedded cache.
+    if let Some(path) = explicit {
+        return finish_sevenzip_resolution(SevenZip::locate(Some(path)), &explicit_path, None);
+    }
+
+    // 2. A valid environment variable must win over the embedded runtime, otherwise
+    //    a stale/older embedded copy would silently shadow the user's 7-Zip.
+    if env_sevenzip_path().is_some() {
+        return finish_sevenzip_resolution(SevenZip::locate(None), &explicit_path, None);
+    }
+
+    // 3. Embedded runtime (Windows single exe), then the automatic search.
+    let embedded = match ensure_embedded_7z() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("警告：内嵌 7-Zip 初始化失败（{error}），尝试外部 7-Zip…");
+            None
+        }
+    };
+    let resolved = if let Some(path) = embedded.clone() {
+        match SevenZip::locate(Some(path)) {
+            Ok(sevenzip) => Ok(sevenzip),
+            Err(error) => {
+                eprintln!("警告：内嵌 7-Zip 无法使用（{error}），尝试外部 7-Zip…");
+                SevenZip::locate(None)
+            }
+        }
+    } else {
+        SevenZip::locate(None)
+    };
+    finish_sevenzip_resolution(resolved, &explicit_path, embedded.as_deref())
+}
+
+fn finish_sevenzip_resolution(
+    resolved: unparanoia_unpack_core::Result<SevenZip>,
+    explicit: &Option<PathBuf>,
+    embedded: Option<&Path>,
+) -> Result<SevenZipChoice, String> {
+    resolved
+        .map(|sevenzip| {
+            let source = classify_sevenzip_source(&sevenzip.exe, explicit.as_deref(), embedded);
+            SevenZipChoice { sevenzip, source }
+        })
+        .map_err(|error| error.to_string())
+}
+
+/// First non-empty `UNPARANOIA_7Z` / `UPZIP_7Z` that points at an existing file.
+fn env_sevenzip_path() -> Option<PathBuf> {
+    for var in ["UNPARANOIA_7Z", "UPZIP_7Z"] {
+        if let Some(raw) = std::env::var_os(var).filter(|value| !value.is_empty()) {
+            let path = PathBuf::from(raw);
+            if path.is_file() {
+                return Some(path);
+            }
         }
     }
+    None
+}
+
+fn classify_sevenzip_source(
+    exe: &Path,
+    explicit: Option<&Path>,
+    embedded: Option<&Path>,
+) -> SevenZipSource {
+    if explicit.is_some_and(|path| path == exe) {
+        return SevenZipSource::Explicit;
+    }
+    if embedded.is_some_and(|path| path == exe) {
+        return SevenZipSource::Embedded;
+    }
+    if env_sevenzip_path().as_deref() == Some(exe) {
+        return SevenZipSource::Environment;
+    }
+    SevenZipSource::External
 }
 
 fn install_ctrlc(cancel: CancelToken) {
@@ -1563,14 +1690,15 @@ async fn cmd_doctor(args: &[String]) -> i32 {
         }
     );
 
-    let sevenzip = match SevenZip::locate(cli.sevenzip.clone()) {
-        Ok(sevenzip) => {
+    let sevenzip = match resolve_sevenzip(cli.sevenzip.clone()) {
+        Ok(choice) => {
             println!(
-                "7-Zip：{}（{}）",
-                sevenzip.exe.display(),
-                sevenzip.version()
+                "7-Zip：{}（{}，来源：{}）",
+                choice.sevenzip.exe.display(),
+                choice.sevenzip.version(),
+                choice.source.label()
             );
-            Some(sevenzip)
+            Some(choice.sevenzip)
         }
         Err(error) => {
             ok = false;

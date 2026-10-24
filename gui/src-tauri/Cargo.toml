@@ -12,6 +12,14 @@ publish = false
 name = "unparanoia_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+default = []
+# Embed the built frontend (frontendDist) into the binary instead of loading
+# devUrl at runtime. The Tauri CLI enables this automatically for tauri build;
+# plain cargo build must pass --features custom-protocol explicitly, otherwise
+# the Windows exe opens a blank window (localhost:1420 connection refused).
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -20,6 +28,7 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 unparanoia-core = { workspace = true }
 unparanoia-unpack-core = { workspace = true }
+unparanoia-embedded-7z = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

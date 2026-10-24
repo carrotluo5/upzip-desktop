@@ -280,38 +280,27 @@ impl Drop for TempFileGuard {
     }
 }
 
-/// Decrypt `input` with `password` into a fresh `TMP_PREFIX`-named `.zip` under
-/// `staging_parent` (or the system temp dir) and return its path.
+/// Decrypt `input` with `password` into exactly `out_path` (parent folders are
+/// created when missing). Progress is reported as whole percent via `on_percent`.
 ///
-/// Progress is reported as `TaskEvent::TaskProgress` (percent 0..=100) in the `decrypt`
-/// stage. The core decryption has no cancellation entry point, so cancelling waits for the
-/// blocking worker to finish and then removes the partial plaintext before returning
-/// `SsefeError::Cancelled`.
-pub async fn decrypt_to_temp(
-    id: u64,
+/// The output file is removed on failure or cancellation. On success the caller owns
+/// the plaintext file and must delete it once it is no longer needed.
+pub async fn decrypt_to_path(
     input: &Path,
     password: &str,
-    staging_parent: Option<&Path>,
+    out_path: &Path,
     cancel: &CancelToken,
-    emit: &mut (dyn FnMut(TaskEvent) + Send),
-) -> Result<PathBuf, SsefeError> {
+    on_percent: &mut (dyn FnMut(u8) + Send),
+) -> Result<(), SsefeError> {
     if cancel.is_cancelled() {
         return Err(SsefeError::Cancelled);
     }
-    let dir = match staging_parent {
-        Some(parent) if parent.is_dir() => parent.to_path_buf(),
-        _ => std::env::temp_dir(),
-    };
-    std::fs::create_dir_all(&dir)
-        .map_err(|error| SsefeError::Io(format!("无法创建临时目录 {}: {error}", dir.display())))?;
-    let out_zip = dir.join(format!("{}{}.zip", crate::TMP_PREFIX, uuid::Uuid::new_v4().simple()));
-    let guard = TempFileGuard::new(out_zip.clone());
-
-    emit(TaskEvent::TaskProgress {
-        id,
-        percent: Some(0),
-        line: "SSEFE v4 解密 0%".to_string(),
-    });
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            SsefeError::Io(format!("无法创建临时目录 {}: {error}", parent.display()))
+        })?;
+    }
+    let guard = TempFileGuard::new(out_path.to_path_buf());
 
     let processed = Arc::new(AtomicU64::new(0));
     let total = Arc::new(AtomicU64::new(0));
@@ -319,7 +308,7 @@ pub async fn decrypt_to_temp(
     let total_cb = Arc::clone(&total);
     let input_owned = input.to_path_buf();
     let password_owned = password.to_string();
-    let out_owned = out_zip.clone();
+    let out_owned = out_path.to_path_buf();
 
     let mut handle = tokio::task::spawn_blocking(move || {
         unparanoia_core::decrypt_to_archive(
@@ -354,11 +343,7 @@ pub async fn decrypt_to_temp(
                     let percent = ((done.min(total_bytes) * 100) / total_bytes).min(99) as u8;
                     if i16::from(percent) > last_percent {
                         last_percent = i16::from(percent);
-                        emit(TaskEvent::TaskProgress {
-                            id,
-                            percent: Some(percent),
-                            line: format!("SSEFE v4 解密 {percent}%"),
-                        });
+                        on_percent(percent);
                     }
                 }
             }
@@ -367,22 +352,78 @@ pub async fn decrypt_to_temp(
 
     match finished {
         Ok(Ok(())) => {
-            if let Err(error) = normalize_inner_zip(&out_zip) {
-                return Err(SsefeError::Io(format!(
-                    "无法规范化解密后的 ZIP（{}）：{error}",
-                    out_zip.display()
-                )));
-            }
-            emit(TaskEvent::TaskProgress {
-                id,
-                percent: Some(100),
-                line: "SSEFE v4 解密完成".to_string(),
-            });
-            Ok(guard.disarm())
+            on_percent(100);
+            guard.disarm();
+            Ok(())
         }
         Ok(Err(error)) => Err(SsefeError::from(error)),
         Err(join_error) => Err(SsefeError::Other(format!("解密线程异常终止：{join_error}"))),
     }
+}
+
+/// Decrypt `input` with `password` into a fresh `TMP_PREFIX`-named `.zip` under
+/// `staging_parent` (or the system temp dir) and return its path.
+///
+/// Progress is reported as `TaskEvent::TaskProgress` (percent 0..=100) in the `decrypt`
+/// stage. The core decryption has no cancellation entry point, so cancelling waits for the
+/// blocking worker to finish and then removes the partial plaintext before returning
+/// `SsefeError::Cancelled`.
+pub async fn decrypt_to_temp(
+    id: u64,
+    input: &Path,
+    password: &str,
+    staging_parent: Option<&Path>,
+    cancel: &CancelToken,
+    emit: &mut (dyn FnMut(TaskEvent) + Send),
+) -> Result<PathBuf, SsefeError> {
+    if cancel.is_cancelled() {
+        return Err(SsefeError::Cancelled);
+    }
+    let dir = match staging_parent {
+        Some(parent) if parent.is_dir() => parent.to_path_buf(),
+        _ => std::env::temp_dir(),
+    };
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| SsefeError::Io(format!("无法创建临时目录 {}: {error}", dir.display())))?;
+    let out_zip = dir.join(format!("{}{}.zip", crate::TMP_PREFIX, uuid::Uuid::new_v4().simple()));
+
+    emit(TaskEvent::TaskProgress {
+        id,
+        percent: Some(0),
+        line: "SSEFE v4 解密 0%".to_string(),
+    });
+    {
+        let mut last_percent: i16 = 0;
+        let mut on_percent = |percent: u8| {
+            // 100% is reported once by decrypt_to_temp after normalization.
+            if percent >= 100 || i16::from(percent) <= last_percent {
+                return;
+            }
+            last_percent = i16::from(percent);
+            emit(TaskEvent::TaskProgress {
+                id,
+                percent: Some(percent),
+                line: format!("SSEFE v4 解密 {percent}%"),
+            });
+        };
+        decrypt_to_path(input, password, &out_zip, cancel, &mut on_percent).await?;
+    }
+
+    // decrypt_to_path disarmed its guard on success; take ownership again so a
+    // normalization failure cannot leave plaintext behind.
+    let guard = TempFileGuard::new(out_zip.clone());
+    if let Err(error) = normalize_inner_zip(&out_zip) {
+        return Err(SsefeError::Io(format!(
+            "无法规范化解密后的 ZIP（{}）：{error}",
+            out_zip.display()
+        )));
+    }
+    emit(TaskEvent::TaskProgress {
+        id,
+        percent: Some(100),
+        line: "SSEFE v4 解密完成".to_string(),
+    });
+    Ok(guard.disarm())
 }
 
 #[cfg(test)]

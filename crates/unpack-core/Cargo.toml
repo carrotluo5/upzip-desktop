@@ -23,3 +23,5 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# testkit feature builds authentic Paranoia v4 containers for end-to-end tests.
+unparanoia-core = { workspace = true, features = ["testkit"] }

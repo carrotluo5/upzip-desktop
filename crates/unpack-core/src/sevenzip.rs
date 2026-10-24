@@ -57,6 +57,10 @@ pub struct ListResult {
     pub offset: u64,
     pub stub_size: u64,
     pub physical_size: u64,
+    /// Number of volumes reported for a split container (0 = not split).
+    pub volumes: u32,
+    /// Sum of all volume sizes reported for a split container.
+    pub total_physical_size: u64,
     pub entries: Vec<ListEntry>,
 }
 
@@ -486,6 +490,40 @@ impl SevenZip {
         }
     }
 
+    /// Best-effort listing of a split-volume container.
+    ///
+    /// 7-Zip can exit with an error while still printing the split header
+    /// ("Type = Split", "Volumes = N") and a partial entry list — exactly what
+    /// happens when a later volume is missing. Returns `Some` only when the
+    /// output proves the file is the first volume of a split family.
+    pub async fn list_split(
+        &self,
+        archive: &Path,
+        cancel: &CancelToken,
+    ) -> Result<Option<ListResult>> {
+        let args = vec![
+            "l".to_string(),
+            "-slt".to_string(),
+            "-sccUTF-8".to_string(),
+            archive.to_string_lossy().into_owned(),
+        ];
+        let (code, out, err) = self
+            .run(&args, None, Some(Duration::from_secs(600)), cancel, &mut |_| {})
+            .await?;
+        if code == EXIT_OK || code == EXIT_WARNING {
+            return Ok(None);
+        }
+        let text = format!("{out}\n{err}");
+        if !text.contains("Type = Split") {
+            return Ok(None);
+        }
+        let mut parsed = parse_slt(&out);
+        if let Some(volumes) = header_u32(&text, "Volumes") {
+            parsed.volumes = volumes;
+        }
+        Ok(Some(parsed))
+    }
+
     async fn run_test(
         &self,
         archive: &Path,
@@ -653,6 +691,14 @@ fn collect_kv(block: &str, out: &mut BTreeMap<String, String>) {
     }
 }
 
+/// Read one numeric header field (e.g. "Volumes") from raw `-slt` output.
+fn header_u32(text: &str, key: &str) -> Option<u32> {
+    let needle = format!("{key} = ");
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix(needle.as_str()))
+        .and_then(|value| value.trim().parse().ok())
+}
+
 /// Parse `l -slt` output into the archive header + entries.
 pub fn parse_slt(text: &str) -> ListResult {
     let text = text.replace("\r\n", "\n");
@@ -676,6 +722,14 @@ pub fn parse_slt(text: &str) -> ListResult {
         .unwrap_or(0);
     result.physical_size = header
         .get("Physical Size")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    result.volumes = header
+        .get("Volumes")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    result.total_physical_size = header
+        .get("Total Physical Size")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 

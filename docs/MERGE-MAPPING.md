@@ -1,8 +1,8 @@
-# 合并映射：upzip → Unparanoia（v0.2.0 合并 + v0.3.0 增量）
+# 合并映射：upzip → Unparanoia（v0.2.0 合并 + v0.3.0/v0.3.1 增量）
 
 > 本文记录 **upzip**（批量解压伪装压缩包，Tauri 2 + Rust）如何合并进
 > **unparanoia**（Paranoia File Encryption v4 `.enc` 解密器），以及 v0.3.0 更名
-> **Unparanoia（帕罗诺亚解包器）** 后的增量。upzip 源码位于
+> **Unparanoia（帕罗诺亚解包器）**、v0.3.1 增量后的变化。upzip 源码位于
 > /Volumes/Carrot/AppPorts/hermes/upzip，这里只记录迁移决策；代码本体已进入
 > crates/unpack-core、crates/cli、gui/。
 >
@@ -11,7 +11,7 @@
 
 ## 1. 总览
 
-v0.2.0 起的产品形态：**一个入口 = 批量解密 + 三层递归解包**（v0.3.0 保持不变）。
+v0.2.0 起的产品形态：**一个入口 = 批量解密 + 三层递归解包**（v0.3.0/v0.3.1 保持不变）。
 
 1. 对 `.enc` 先做 Paranoia v4 解密（crates/core），得到内层 ZIP；
 2. 对内层 ZIP、伪装/缺失文件头的压缩包、普通压缩包统一交给 7-Zip 解包；
@@ -103,3 +103,17 @@ v0.3.0 的用户需求是「独立密码管理页、多密码明文保存」，�
 | 明暗主题可跟随系统 | crates/unpack-core/src/settings.rs（ThemeMode）+ gui/src/App.tsx/App.css + gui/src-tauri | 设置页下拉 跟随系统/浅色/深色；`document.documentElement.dataset.theme`；system 监听 `prefers-color-scheme` |
 | 重画图标 | assets/icon.svg + gui/src-tauri/icons/* + gui/public/icon.png | 蓝渐变圆角方 + 白色开盖纸箱/拉链 + 金色开锁挂锁 |
 | 旧配置迁移 | crates/core/src/config.rs、crates/unpack-core/src/settings.rs | 旧 `paranoia-enc-decryptor/` 目录只读迁移到 `unparanoia/`；旧 env `PARANOIA_ENC_*` 仅回退读取 |
+## 6. v0.3.1 增量（分卷 / Windows 单 exe）
+
+| 需求 | 实现位置 | 说明 |
+|---|---|---|
+| 分段压缩包（普通分卷） | `crates/unpack-core/src/split.rs` + `engine.rs` | 识别 `.7z.001`/`.zip.001`/`.part1.rar` 家族；同族聚合为一个任务；7-Zip 只从首卷进入；只给非首卷 → Skipped + 「请添加第一卷」；缺后续卷 → Failed + 零半成品 |
+| SSEFE 加密分卷（`.enc`） | 同上 + `ssefe.rs` | 每卷是独立 Paranoia v4 容器；逐卷用完整候选池解密到 staging `volumes/<stem>/`，再按 7-Zip 分卷读取；任一卷失败不产出半成品 |
+| 真实样本验证 | — | `3138.7z.001.enc`+`.002.enc`（口令 123/anzixin）→ 1 任务、输出 `3138/` 5 文件 352.85 MiB；只给首卷自动发现、只给非首卷跳过、缺卷失败（VERIFICATION.md §8） |
+| Windows 单 exe（内嵌 7-Zip） | 新增 `crates/embedded-7z/` + `gui/src-tauri/src/lib.rs` + `crates/cli/src/main.rs` | Windows 版 `include_bytes!` 内嵌 7z.exe/7z.dll/许可证；首次运行解压到 `%LOCALAPPDATA%\Unparanoia\embedded-7z\25.01-r1\`（`UNPARANOIA_7Z_CACHE_DIR` 可覆盖）；GUI 回退不阻止启动，CLI 优先级 explicit > env > 内嵌 > 自动探测 |
+| 7-Zip 许可证查看 | `crates/cli/src/main.rs`（`--licenses`）+ GUI 设置页 | 内嵌/随包 7-Zip 的 LGPL 2.1 + unRAR 限制文本；不改变许可义务 |
+| 修复 Windows GUI 白屏 | `gui/src-tauri/Cargo.toml` 的 `custom-protocol` feature + 构建脚本/CI | 裸 cargo build 缺 `--features custom-protocol` 时不嵌入前端、运行时加载 devUrl 导致白屏；所有 Windows GUI 构建路径必须显式带该 feature |
+| 便携包不再带 sidecar | `scripts/build-windows-portable.sh`/`build-windows.ps1`/CI | 输出 `Unparanoia.exe` + `unparanoia-cli.exe` + 许可证/README/SHA256SUMS（单 exe 可独立运行）；不再复制 7z.exe/7z.dll |
+| 测试夹具与 e2e | `scripts/make-fixtures.sh`、`scripts/e2e-verify.sh` | 新增 `split.7z.001..004`、`split.7z.001.enc..`、`truncated.7z.001.enc`；e2e 增加普通分卷/加密分卷组/只给非首卷/缺卷 + `--licenses` 用例（91 项） |
+| 版本与产物命名 | Cargo.toml / gui/package.json / tauri.conf.json / docs | 0.3.1；`Unparanoia_0.3.1_aarch64.dmg`、`Unparanoia-0.3.1-win-x64-portable.zip`；最终哈希见 VERIFICATION.md §7 |
+

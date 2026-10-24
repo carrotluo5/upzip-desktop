@@ -1764,10 +1764,44 @@ function SettingsTab({
   pushLog,
 }: SettingsTabProps) {
   const [draft, setDraft] = useState<Settings>(settings);
+  const [licenseOpen, setLicenseOpen] = useState(false);
+  const [licenseText, setLicenseText] = useState<string | null>(null);
+  const [licenseLoading, setLicenseLoading] = useState(false);
+  const [licenseError, setLicenseError] = useState<string | null>(null);
 
   useEffect(() => {
     setDraft(settings);
   }, [settings]);
+
+  useEffect(() => {
+    if (!licenseOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setLicenseOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [licenseOpen]);
+
+  async function openLicense() {
+    setLicenseOpen(true);
+    setLicenseLoading(true);
+    setLicenseError(null);
+    try {
+      const text = await invoke<string>("seven_zip_license");
+      setLicenseText(typeof text === "string" ? text : String(text));
+    } catch (error) {
+      const message = "读取 7-Zip 许可证失败: " + errText(error);
+      setLicenseError(message);
+      notify(message);
+      pushLog(message);
+    } finally {
+      setLicenseLoading(false);
+    }
+  }
+
+  function closeLicense() {
+    setLicenseOpen(false);
+  }
 
   function patch<K extends keyof Settings>(key: K, value: Settings[K]) {
     setDraft((prev) => ({ ...prev, [key]: value }));
@@ -2002,6 +2036,29 @@ function SettingsTab({
         </section>
 
         <section className="section">
+          <h4>关于 / 7-Zip 许可证</h4>
+          <div className="techinfo">
+            <div>
+              <b>7-Zip</b>：
+              {info && info.sevenZipVersion
+                ? "内嵌 7-Zip " + info.sevenZipVersion + "（GNU LGPL 2.1 + unRAR 限制），许可证随程序分发"
+                : "内嵌 7-Zip 25.01（GNU LGPL 2.1 + unRAR 限制），许可证随程序分发"}
+            </div>
+            {info && info.sevenZip ? (
+              <div>
+                <b>位置</b>：<span className="mono">{info.sevenZip}</span>
+              </div>
+            ) : null}
+            <div className="muted small">
+              7-Zip 以独立开源组件随程序分发；点击下方按钮可在程序内查看完整许可证全文（含 unRAR 限制条款）。
+            </div>
+          </div>
+          <div className="buttons">
+            <button onClick={() => void openLicense()}>查看 7-Zip 许可证</button>
+          </div>
+        </section>
+
+        <section className="section">
           <h4>运行信息</h4>
           <div className="techinfo">
             <div>
@@ -2029,6 +2086,34 @@ function SettingsTab({
           </div>
         </section>
       </div>
+
+      {licenseOpen && (
+        <div className="licenseoverlay" role="presentation" onClick={closeLicense}>
+          <div
+            className="licensebox"
+            role="dialog"
+            aria-modal="true"
+            aria-label="7-Zip 许可证"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="licensehead">
+              <h4>7-Zip 许可证（GNU LGPL 2.1 + unRAR 限制）</h4>
+              <button className="mini" onClick={closeLicense}>
+                关闭
+              </button>
+            </div>
+            <div className="licensebody">
+              {licenseLoading ? (
+                <div className="muted">正在读取许可证…</div>
+              ) : licenseError ? (
+                <div className="bad">{licenseError}</div>
+              ) : (
+                <pre className="licensepre">{licenseText ?? ""}</pre>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

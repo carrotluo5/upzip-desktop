@@ -4094,7 +4094,7 @@ checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
 name = "unparanoia"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4103,24 +4103,26 @@ dependencies = [
  "tauri-plugin-dialog",
  "tokio",
  "unparanoia-core",
+ "unparanoia-embedded-7z",
  "unparanoia-unpack-core",
 ]
 
 [[package]]
 name = "unparanoia-cli"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "clap",
  "serde",
  "serde_json",
  "tokio",
  "unparanoia-core",
+ "unparanoia-embedded-7z",
  "unparanoia-unpack-core",
 ]
 
 [[package]]
 name = "unparanoia-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "aes",
  "argon2",
@@ -4138,8 +4140,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "unparanoia-embedded-7z"
+version = "0.3.1"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "unparanoia-unpack-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "dirs 6.0.0",
  "hex",

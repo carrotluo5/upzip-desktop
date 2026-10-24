@@ -111,7 +111,33 @@ impl Drop for RunningGuard<'_> {
 }
 
 fn locate_sevenzip() -> Result<SevenZipInfo, String> {
-    let sz = SevenZip::locate(None).map_err(|error| {
+    // Priority matches the CLI: explicit --sevenzip (the GUI has none) >
+    // UNPARANOIA_7Z / UPZIP_7Z environment override > embedded 7-Zip >
+    // automatic search. SevenZip::locate(None) already honours the two env
+    // vars, so when one points at a real file we must not pass the embedded
+    // path: an explicit path is checked before the env vars and would win.
+    let env_override = ["UNPARANOIA_7Z", "UPZIP_7Z"].iter().any(|variable| {
+        std::env::var_os(variable)
+            .filter(|value| !value.is_empty())
+            .map(|value| PathBuf::from(value).is_file())
+            .unwrap_or(false)
+    });
+    let embedded = if env_override {
+        None
+    } else {
+        // Windows single-exe builds carry 7z.exe + 7z.dll inside our own
+        // binary; ensure_7z() materializes them into %LOCALAPPDATA% and returns
+        // the path. On macOS it returns None and SevenZip::locate falls back to
+        // the bundled Resources/binaries/mac/7zz or an installed 7-Zip.
+        match unparanoia_embedded_7z::ensure_7z() {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("[unparanoia-gui] 内嵌 7-Zip 初始化失败，回退外部 7-Zip：{error}");
+                None
+            }
+        }
+    };
+    let sz = SevenZip::locate(embedded).map_err(|error| {
         format!(
             "找不到 7-Zip（{error}）。请安装 7-Zip，或设置环境变量 UNPARANOIA_7Z 指向 7zz/7z.exe，\
              或把二进制放到应用的 binaries/ 目录。"
@@ -466,6 +492,12 @@ fn clear_passwords() -> Result<(), String> {
     core_clear_passwords().map_err(|error| error.to_string())
 }
 
+/// 7-Zip 许可证全文（LGPL 2.1 + unRAR 限制），设置页“查看许可证”入口使用。
+#[tauri::command]
+fn seven_zip_license() -> String {
+    unparanoia_embedded_7z::LICENSE_TEXT.to_string()
+}
+
 #[tauri::command]
 fn get_config_path() -> Result<String, String> {
     config_file_path()
@@ -702,6 +734,7 @@ pub fn run() {
             add_password,
             remove_password,
             clear_passwords,
+            seven_zip_license,
             get_config_path,
             pick_input_files,
             pick_output_dir,

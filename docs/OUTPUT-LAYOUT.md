@@ -1,8 +1,9 @@
 # 输出布局与处理流程（OUTPUT-LAYOUT）
 
-本文描述 v0.3.0（Unparanoia）解包引擎**实际写入磁盘的行为**：目录怎么决定、内层怎么落盘、
-冲突怎么办、临时与残留如何管理、口令怎么重试、失败/跳过的判定。所有规则以代码为准，
-行号指向 `crates/unpack-core/src/`（2026-10-24 v0.3.0 工作树；函数名比行号更稳）。
+本文描述 v0.3.1（Unparanoia）解包引擎**实际写入磁盘的行为**：目录怎么决定、内层怎么落盘、
+分段压缩包怎么聚合、冲突怎么办、临时与残留如何管理、口令怎么重试、失败/跳过的判定。
+所有规则以代码为准，位置指向 `crates/unpack-core/src/`（2026-10-24 v0.3.1 工作树；
+函数名比行号更稳）。
 
 ## 1. 一次处理的任务阶段
 
@@ -20,6 +21,9 @@
 
 进度通过 `TaskProgress{percent, line}` 推送；7-Zip 的 stdout 行会原样进入 `line`
 （可能带 `\b` 退格控制符，属于 7-Zip 输出特性，UI/CLI 只做展示）。
+
+> v0.3.1 起，**同一分卷家族**的多个输入会先聚合为一个逻辑任务（`path`=首卷），
+> 其余卷不单独建任务；详见 §2.1。
 
 ### 1.1 口令候选池与逐层重试（v0.3.0）
 
@@ -57,8 +61,9 @@
   - `--layout folder` → **true**，强制 `parent/<stem>/`；
   - `--layout smart`（默认）→ `top_count > 1` 时为 **true**，否则直接摊开。
 - 文件夹名 `<stem>` = 归档文件名去掉**一个**扩展名后再做 `sanitize_component`
-  （非法字符替换、去首尾点/空格）：`3138.7z.001` → `3138.7z`；
-  `sample.enc` → `sample`；`normal.zip` → `normal`。
+  （非法字符替换、去首尾点/空格）：`sample.enc` → `sample`；`normal.zip` → `normal`。
+  **分卷**先去卷号后缀再去一个扩展名：`3138.7z.001` → `3138`、`3138.7z.001.enc` → `3138`、
+  `x.part1.rar` → `x`（`split.rs` 的 `archive_stem` 规则）。
 - `top_count` 是解压后**顶层条目数**（不含垃圾条目，见 §5）。
 
 实测（`testdata/fixtures`，2026-10-24）：
@@ -72,6 +77,45 @@ nested.enc  (级联后最内层 hello)   -> out/hello.txt
 
 注意：`--layout smart` 的 `top_count` 按**最外层解包结果**计算；级联展开发生在
 staging 内部，不会额外多包一层。
+
+## 2.1 分段压缩包（v0.3.1）
+
+卷名识别（`crates/unpack-core/src/split.rs`）：
+
+| 家族 | 首卷 | 其余卷 | `container` |
+|---|---|---|---|
+| 7-Zip 分卷 | `<stem>.7z.001` | `.002`、`.003`… | `7z-volume` |
+| ZIP 分卷 | `<stem>.zip.001` | `.002`… | `zip-volume` |
+| WinRAR 分卷 | `<stem>.part1.rar` | `.part2.rar`… | `rar-volume` |
+| SSEFE 加密分卷 | `<stem>.7z.001.enc` | `.002.enc`… | 解密后同上 |
+
+规则：
+
+- **聚合**：同目录/同批输入中同家族的卷合并为**一个对话框任务**，7-Zip 只从首卷进入；
+  用户把 `.001` 与 `.002` 一起拖入不会产生两个任务，也不会重复解压。只给首卷时，
+  同目录其余卷会被自动发现。
+- **布局**：`3138.7z.001` + `.002` → 输出 `3138/`（见 §2 的 stem 规则）。
+- **只给非首卷**（例如只有 `.002`、没有 `.001`）：状态 `Skipped`（CLI exit 0），
+  原因文案「分卷压缩包：请添加第一卷（.001 / .part1.rar）；期望首卷：<名字>」。
+- **缺后续卷**（有首卷、卷数不全）：状态 `Failed`（整批 exit 1），
+  原因文案「分卷压缩包缺少后续卷（找到 N/M 卷）」，**不写任何半成品输出**。
+- **SSEFE 分卷**：每卷是独立的 Paranoia v4 容器，逐卷用同一候选池解密到
+  staging 的 `volumes/<stem>/` 目录，再按 7-Zip 分卷读取；任一卷缺密码/解密失败 →
+  `NeedsPassword`（或明确失败），清 staging，不产生半成品。
+- **嵌套**：内层压缩包如果是分卷，同样按上述规则级联（§7），深度计入 `max_depth`。
+- `detect` 对首卷报告：`kind=archive`、`container=7z-volume|zip-volume|rar-volume`、
+  `format=7z|zip|rar`，`notes` 含「分卷压缩包（N 卷，合计 M B）」；`.enc` 首卷在解密前
+  显示为 `ssefe_encrypted`，解密后 `TaskDetected` 变为分卷容器并附
+  「已用 Paranoia v4 明文口令解密分卷（N 卷）」。
+
+实测（`testdata/fixtures`，v0.3.1 e2e）：
+
+```text
+split.7z.001 (+同目录 002-004)                -> out/split/{hello.txt,blob.bin}   # 1 个任务
+split.7z.001.enc + split.7z.002.enc (+同目录)  -> out/split/...                    # 聚合 + 候选 #2
+只给 split.7z.002.enc（无 001）               -> Skipped，提示补第一卷，零产出
+truncated.7z.001.enc（只有首卷）              -> Failed「缺少后续卷」，零半成品
+```
 
 ## 3. 冲突策略（落地时）
 
@@ -134,6 +178,7 @@ staging 内部，不会额外多包一层。
 
 - 只有"看起来是压缩包"的内层文件才会递归：由 7-Zip 列表或魔数判定，
   `max_depth` 默认 4（`RunConfig::effective_max_depth()` clamp 到 1..=8）。
+  内层分卷同样支持（卷在 staging 内先聚合再展开）。
 - SSEFE 解密出的明文 ZIP 视为一层归档（计 1 层），之后按普通压缩包处理。
   - 与 v0.1.x 的差异：旧 paranoia 只解密出内层 ZIP 就结束（用户自己再解压）；
     v0.2.0 会继续展开内层 ZIP（行为增强，`max_depth` 同样适用）。
@@ -157,6 +202,7 @@ staging 内部，不会额外多包一层。
 | 任务阶段 / staging / keep_broken / 空间检查 | `crates/unpack-core/src/engine.rs` |
 | 队列、并发、暂停/取消、汇总 | `crates/unpack-core/src/queue.rs`、`cancel.rs` |
 | 指纹、move/copy、临时文件 | `crates/unpack-core/src/util.rs` |
+| 分卷家族识别/聚合/缺卷检测 | `crates/unpack-core/src/split.rs` |
 | 7-Zip 调用、密码检测、列表解析 | `crates/unpack-core/src/sevenzip.rs` |
 | SSEFE 解密与内层 ZIP 归一化 | `crates/unpack-core/src/ssefe.rs` |
 | processed.json / settings.json | `crates/unpack-core/src/processed.rs`、`settings.rs` |

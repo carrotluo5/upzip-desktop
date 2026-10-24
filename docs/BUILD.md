@@ -1,6 +1,7 @@
 # 构建（BUILD）— macOS / Linux
 
-本文讲 **Unparanoia 0.3.0** 的构建与产物；Windows 详见 [WINDOWS_BUILD.md](WINDOWS_BUILD.md)。
+本文讲 **Unparanoia 0.3.1** 的构建与产物；Windows 详见 [WINDOWS_BUILD.md](WINDOWS_BUILD.md)。
+0.3.1 起 Windows 便携包改为**单 exe**（GUI/CLI 内嵌 7-Zip 与前端，不再附 sidecar）。
 项目是单个 Cargo workspace + 一个 Vite/React 前端，`gui/src-tauri` 是 workspace 成员，
 所以**所有 Rust 产物都在仓库根目录的 `target/` 下**（不是 `gui/src-tauri/target`，
 旧版文档里那个路径已过时）。
@@ -26,9 +27,9 @@
 脚本依次做（任何一步失败即退出）：
 
 1. 环境检查（cargo/node/pnpm、Xcode CLT、`binaries/mac/7zz` 存在）；
-2. `cargo test --workspace` —— core 单测 + oracle 向量回放 + unpack-core 单测
-   （v0.3.0 当前 91 通过 / 0 失败 / 2 ignored，最终以 VERIFICATION.md §2 为准；
-   `real_sample` 2 个需要真实样本的测试默认 ignored）；
+2. `cargo test --workspace` —— core 单测 + oracle 向量回放 + embedded-7z 单测 +
+   unpack-core 单测（v0.3.1 当前 107 通过 / 0 失败 / 2 ignored，最终以
+   VERIFICATION.md §2 为准；`real_sample` 2 个需要真实样本的测试默认 ignored）；
 3. `pnpm --dir gui install --frozen-lockfile`；
 4. `pnpm --dir gui tauri build`（`beforeBuildCommand` 自动跑
    `pnpm sync:binaries && pnpm build`，把前端 dist 与 7-Zip 资源打进 .app）；
@@ -77,6 +78,7 @@ DMG 里的 .app 是本次构建的完整拷贝；`target/` 与 `gui/dist/` 都�
 | 图标/配置改了但 .app 还是旧图标 | 删 `target/release` 或 `touch gui/src-tauri/build.rs` 强制 tauri-build 重跑 |
 | `pnpm install --frozen-lockfile` 失败 | 锁文件与 package.json 不一致：本地先 `pnpm --dir gui install` 更新并提交锁文件 |
 | DMG 构建失败但 .app 已生成 | 常见于已挂载同名卷/残留 `bundle_dmg.sh`；先 `hdiutil info` 卸载旧卷再重试。**2026-10-24 本机实测的另一种根因（已定位）：**之前被超时杀掉/中断的构建在 `target/release/bundle/macos/` 留下同名半成品 `Unparanoia_<version>_aarch64.dmg`（512 B）和 `rw.<pid>.*.dmg`（各约 39.9 MB）；`bundle_dmg.sh` 以 cwd=`target/release/bundle/macos` 运行且用相对文件名，`hdiutil convert` 目标已存在 → `hdiutil: convert failed - 文件已经存在`，tauri 又把脚本 stderr 吞成 `failed to run bundle_dmg.sh`。修复：`rm -f target/release/bundle/macos/Unparanoia_<version>_aarch64.dmg target/release/bundle/macos/rw.*.dmg` 后重跑即成功（无需改代码）。另：同一工作区建议串行构建，避免残留 |
+| GUI 在 Windows 上白屏 / 停在 `localhost:1420` | 裸 `cargo build` 构建 GUI 时漏了 `--features custom-protocol`（`tauri build` 与 `scripts/build-windows-*.{sh,ps1}` 会自动带）；见 WINDOWS_BUILD.md §4 |
 | 端口 1420 被占用（dev 模式） | `pnpm --dir gui dev` 用的固定端口；杀掉占用进程 |
 
 ## 6. 开发模式
@@ -91,17 +93,26 @@ pnpm --dir gui tauri dev      # 起 Vite dev server + Tauri 窗口，改前端�
 
 ## 7. 实测记录与已知环境问题
 
-**v0.3.0 产物大小/SHA-256（2026-10-24 16:12-16:16 最终构建，macOS arm64 本机）**：
+**v0.3.1 最终构建记录（2026-10-24 18:06-18:08，macOS 27.2 arm64 本机，
+`./scripts/build.sh` exit 0；其中 `cargo test --workspace` = 107 passed / 0 failed /
+2 ignored）**：
 
 | 产物 | 大小 (B) | SHA-256 |
 |---|---|---|
-| `target/release/bundle/dmg/Unparanoia_0.3.0_aarch64.dmg` | 8,185,594 | `721c862545914cd11c707f3a2ce554100f2b3822b7e369d1a91816bb2f5b6e1a` |
-| `.app` 主二进制 = `target/release/unparanoia` | 7,315,392 | `76d9c9018d532b66a3c2ba0d4e5bb7ceffadf398f4e9c765ee3fdc2367b69ddb` |
-| `target/release/unparanoia-cli` | 2,706,464 | `75730f72f9122abba716c329d5ef45c86abd0815d6d2ccd9e2741fd9e2c13d74` |
+| `target/release/bundle/dmg/Unparanoia_0.3.1_aarch64.dmg` | 8,212,544 | `c7ac5ade88d2d14d644cd99e629e2a52e8e1b4590929d9c2946f8adae723fd76` |
+| `.app` 主二进制 = `target/release/unparanoia` | 7,398,032 | `4b689e1e18b32c43d442360987b6d952796ecc5f0957303e99161e5c8a032300` |
+| `target/release/unparanoia-cli` | 2,789,152 | `348df56c88dff62482a4e45eb76f40ec5b676bf169b50b27b0779fcb6d78767d` |
 
-Windows 便携 zip 与包内 exe 的哈希见 [VERIFICATION.md](VERIFICATION.md) §7 与
+DMG 挂载复验通过：含 `Applications` 链接与 `Unparanoia.app`（0.3.1、
+`com.nanase.unparanoia`、minOS 12.0），`Contents/Resources/binaries/mac/7zz` 存在且哈希
+与 `binaries/mac/7zz` 一致。`.app` 仍为 ad-hoc 签名（`codesign --verify --deep --strict`
+失败），不能直接分发。
+
+Windows 单 exe 便携 zip 与包内 exe 的哈希见 [VERIFICATION.md](VERIFICATION.md) §7 与
 [WINDOWS_BUILD.md](WINDOWS_BUILD.md) §5。每次重新构建（即使源码相同）哈希都会变，
 因为二进制/打包包含构建时间与路径。
+
+> v0.3.0 的历史产物数字已过时，本文件不再保留，避免误引用。
 
 **已知环境问题（2026-10-24，macOS 27.2 arm64，v0.2.0 构建时实测）——已定位，非代码 bug**：
 DMG 打包曾失败，tauri 只回报 `failed to run bundle_dmg.sh`（脚本 stderr 被吞）。

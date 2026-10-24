@@ -28,7 +28,18 @@ pub fn is_junk_name(name: &str) -> bool {
 }
 
 /// Sanitised archive base name: "示例 A.mp4" -> "示例 A".
+///
+/// Split families collapse to the family stem so every volume maps to one output
+/// folder: "3138.7z.001" -> "3138", "x.part1.rar" -> "x", and SSEFE-encrypted
+/// volumes ("3138.7z.001.enc") likewise.
 pub fn archive_stem(archive: &Path) -> String {
+    if let Some(volume) = archive
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(crate::split::parse_volume_name)
+    {
+        return sanitize_component(&volume.stem());
+    }
     let stem = archive
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
@@ -322,6 +333,17 @@ mod tests {
         // ":"" and "?" are both replaced, so the stem keeps a trailing underscore.
         assert_eq!(archive_stem(Path::new("/tmp/a:b?.zip")), "a_b_");
         assert_eq!(archive_stem(Path::new("/tmp/x:*?.zip")), "x___");
+    }
+
+    #[test]
+    fn archive_stem_strips_split_volume_suffix() {
+        assert_eq!(archive_stem(Path::new("/tmp/3138.7z.001")), "3138");
+        assert_eq!(archive_stem(Path::new("/tmp/3138.7z.001.enc")), "3138");
+        assert_eq!(archive_stem(Path::new("/tmp/x.part1.rar")), "x");
+        assert_eq!(archive_stem(Path::new("/tmp/x.part12.rar")), "x");
+        // Non-volume names keep the old behaviour (SSEFE containers included).
+        assert_eq!(archive_stem(Path::new("/tmp/sample.enc")), "sample");
+        assert_eq!(archive_stem(Path::new("/tmp/a.zip")), "a");
     }
 
     #[test]

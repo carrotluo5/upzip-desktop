@@ -750,6 +750,32 @@ pub async fn detect(sz: &SevenZip, path: &Path, cancel: &CancelToken) -> Result<
         } else {
             FileKind::Archive
         };
+
+        // Split / multi-volume family: the first volume is the only valid 7-Zip
+        // entry point, and 7-Zip reads the sibling volumes from the same folder.
+        if let Some(volume) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(crate::split::parse_volume_name)
+        {
+            let family = crate::split::discover(path);
+            det.container = volume.kind.container().to_string();
+            det.format = Some(volume.kind.ext().to_string());
+            det.kind = FileKind::Archive;
+            det.notes.push(match &family {
+                Some(family) => family.describe(),
+                None => format!("分卷压缩包（{} 卷）", l.volumes.max(1)),
+            });
+            if let Some(family) = &family {
+                if family.volume_count() as u32 > l.volumes {
+                    det.notes.push(format!(
+                        "已发现 {} 卷，7-Zip 报告 {} 卷",
+                        family.volume_count(),
+                        l.volumes
+                    ));
+                }
+            }
+        }
     } else if needs_pw {
         det.password_state = PasswordState::NeedsPassword;
         det.kind = if container == "pe" {

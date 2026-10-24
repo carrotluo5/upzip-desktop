@@ -1,4 +1,4 @@
-# 开发契约 (v0.3.0)
+# 开发契约 (v0.3.1)
 
 本文件是并行开发期间的**唯一接口契约**。Lead 维护；core-reader / app-reader / gui-frontend / docs-reader
 按各自写作用域实现，不要修改别人作用域内的文件（需要变更先发给 Lead）。
@@ -16,7 +16,7 @@
 | `Cargo.toml`、`Cargo.lock`、`.gitignore`、`testdata/` fixtures | 工作区、锁文件、清理规则、验收样例 | Lead |
 
 根工作区成员：`crates/core`、`crates/unpack-core`、`crates/cli`、`gui/src-tauri`；版本 0.3.0（产品名 Unparanoia）。
-**v0.3.0 的全部接口变更见第 7 节；第 2–6 节凡与第 7 节冲突，以第 7 节为准。**
+**v0.3.0 的全部接口变更见第 7 节；v0.3.1 见第 8 节；第 2–7 节凡与第 8 节冲突，以第 8 节为准。**
 **不要**给 gui/src-tauri 再加 `[workspace]`；不要提交 `target/`、`gui/node_modules/`、`gui/dist/`、`gui/src-tauri/binaries/`、`testdata/`。
 
 构建配置变更（相对 0.1.1，已记录）：release `opt-level = 3`（原 "s"）、移除 `panic = "abort"`（GUI 批量线程需要 catch_unwind 兜底）；保留 dev 下 argon2/skein/blake3/sha3 = 3。
@@ -321,3 +321,106 @@ scripts/{build.sh,build-windows-portable.sh,build-windows.ps1,e2e-verify.sh,make
 （Unparanoia_0.3.0_aarch64.dmg、Unparanoia-0.3.0-win-x64-portable.zip、Unparanoia.exe）、密码管理页、
 主题、多密码逐层尝试、图标。产物哈希留「待最终构建回填」，由 Lead 构建后统一替换；不要运行 GUI/dmg/Windows 构建。
 
+## 8. v0.3.1 增补（2026-10-24，最新契约，覆盖前文冲突处）
+
+版本 **0.3.1**（产品名仍为 Unparanoia）。用户报 4 项：①Windows 11 真机白屏 localhost 拒绝连接；
+②分段压缩包识别/解压（含 .enc 分卷，真实样本 /Volumes/Carrot/Download/3138.7z.001.enc + .002.enc，
+解密密码 123，7z 密码 anzixin）；③Windows 尽量发**单独 exe**、不依赖外部文件；④最终产物放桌面新建文件夹。
+
+### 8.1 Windows 白屏根因与修复（app-reader；Lead 已定位）
+
+根因：GUI 的 tauri 未启用 custom-protocol feature。Tauri 2.12 的 tauri-macros / tauri-codegen 在
+cfg!(not(feature = "custom-protocol")) 时判定为 dev 构建、不内嵌 frontendDist，运行时加载 devUrl =
+http://localhost:1420 → Windows exe 直接双击即 ERR_CONNECTION_REFUSED。macOS 走 pnpm tauri build
+（CLI 自动加 feature）所以正常；Windows 走裸 cargo xwin build 没有该 feature。
+
+修复（gui/src-tauri）：
+
+```toml
+[features]
+default = []
+custom-protocol = ["tauri/custom-protocol"]
+```
+
+Windows GUI 构建命令必须加 --features custom-protocol。验收证据：strings <exe> 命中内嵌前端中文串
+（如「帕罗诺亚解包器」「本次追加密码」）；注意 localhost:1420 配置串在两种构建里都会出现，不能作为判据。
+
+### 8.2 Windows 单 exe：内嵌 7-Zip（Lead 已建 crate，app-reader / core-reader 接入）
+
+新 crate crates/embedded-7z（package unparanoia-embedded-7z，已加入根 workspace，Lead 维护）：
+
+```rust
+pub const SEVEN_ZIP_VERSION: &str = "25.01";
+pub const LICENSE_TEXT: &str; // 7-Zip LGPL + unRAR 限制全文
+pub fn ensure_7z() -> Result<Option<PathBuf>, Embedded7zError>;
+```
+
+Windows：用 include_bytes! 把 binaries/win/7z.exe + 7z.dll 打进调用方 exe，首次运行解压到
+%LOCALAPPDATA%\\Unparanoia\\embedded-7z\\25.01-r1\\（UNPARANOIA_7Z_CACHE_DIR 可覆盖），返回 7z.exe 路径；
+非 Windows：Ok(None)（无副作用）。7-Zip 许可证同时写入缓存目录。
+
+接入要求：
+- gui/src-tauri/Cargo.toml、crates/cli/Cargo.toml 加依赖 unparanoia-embedded-7z = { workspace = true }。
+- GUI locate_sevenzip()：先 ensure_7z() 成功则 SevenZip::locate(Some(path))；失败只记录日志并回落
+  SevenZip::locate(None)（不得让 GUI 起不来）。
+- CLI build_sevenzip()：显式 --sevenzip 优先；否则先 ensure_7z() 得内嵌路径再 locate(Some(path))；
+  失败回落 locate(None)。doctor 打印 7-Zip 来源（内嵌/外部/环境变量）与版本。
+- CLI 新增 --licenses（或在 doctor 输出）打印 LICENSE_TEXT；GUI 设置页展示「内嵌 7-Zip 25.01（LGPL + unRAR 限制）」
+  与许可证查看入口（可新增命令 seven_zip_license() -> String，前端 owner gui-frontend）。
+- Windows 产物不再附带 7z.exe/7z.dll 侧车文件；macOS .app 继续由 bundle resources 带 binaries/mac/7zz。
+
+### 8.3 分段压缩包（engine-dev，crates/unpack-core）
+
+命名族：7z/zip 为 <stem>.7z.001、<stem>.zip.001…（首卷 = .001）；RAR 为 <stem>.part1.rar…。
+族键 = 去掉卷号后的 <stem>.<ext>。只有第一卷是 7-Zip 入口，7-Zip 会自动读取同目录其它卷。
+
+输入分组（在 run_batch / 队列前置做，公共 API 尽量不变）：
+1. 普通分卷：一次输入含同族多个卷（或目录展开后）→ **合并为一个逻辑任务**，任务 path = 第一卷；其余卷不单独发
+   TaskQueued。7z 直接解首卷即可。
+2. SSEFE 分卷：<stem>.7z.001.enc + <stem>.7z.002.enc → 同一逻辑任务，按候选密码逐个解密
+   （verify→decrypt）到任务 staging 子目录（例如 staging/volumes/<stem>/），**全部卷解密完成后**再交给 7z 解压；
+   任一卷缺密码/密码错 → 整个任务 NeedsPassword，清理 staging、不落半成品。
+3. 只给非首卷（如仅 .002.enc）→ Skipped，reason 明确「分卷压缩包：请添加第一卷（.001 / .part1.rar）」并给出期望首卷名；
+   不报 Failed。若同族首卷已在本次输入中，则按组合并处理（用户拖任意一卷都能工作）。
+
+检测：以第一卷代表整族返回 Detection：kind=Archive，container = "7z-volume"/"zip-volume"/"rar-volume"，
+format = "7z"/"zip"/"rar"，notes 含「分卷压缩包（N 卷，合计 M B）」；total_entries/top_level/
+total_uncompressed/encrypted_entries 用 7z list 结果。内部可新增 SplitFamily 结构，不改 FileKind。
+
+解压与密码：主解压沿用多密码重试（v0.3.0 契约）——SSEFE 解密用密码库中的 123，7z 解压再命中密码库中的
+anzixin，不需要用户手输。分卷解压失败/缺密码：清理 staging、不落半成品。
+
+布局：archive_stem 必须 3138.7z.001 → 3138、x.part1.rar → x（不能得到 3138.7z / x.part1）。
+嵌套：内层级联同样支持分卷族；内层解出多卷时先移到同一目录再尝试 7z。
+
+真实样本（只读，不可修改源文件）：/Volumes/Carrot/Download/3138.7z.001.enc（209,779,415 B）+
+3138.7z.002.enc（60,527,110 B）；解密后 3138.7z.001 209,715,200 B、3138.7z.002 60,508,410 B。
+engine-dev 必须用 CLI 手动验证（可先 7zz l 用密码 anzixin 查看，再完整解压到 /tmp 验证后删除；大产物不进仓库）。
+
+### 8.4 构建/产物与文档（docs-reader，Lead 最终构建）
+
+- 版本 0.3.1。macOS：./scripts/build.sh → Unparanoia_0.3.1_aarch64.dmg + .app（Resources 仍带 7zz/license）。
+- Windows：./scripts/build-windows-portable.sh 改为**单 exe 交付**：
+  pnpm --dir gui build → cargo xwin build --release --target x86_64-pc-windows-msvc -p unparanoia --features custom-protocol
+  → cargo xwin build --release --target x86_64-pc-windows-msvc -p unparanoia-cli →
+  产物 target/windows-portable/Unparanoia-0.3.1-win-x64.exe（GUI 单文件）与
+  unparanoia-cli-0.3.1-win-x64.exe（可选单文件）；不再复制 7z.exe/7z.dll；可附 SHA256SUMS.txt/README.txt；
+  不要求 zip/NSIS/安装器。
+- 桌面交付（Lead）：~/Desktop/Unparanoia-0.3.1/ 放 dmg、Windows GUI exe、CLI exe、SHA256SUMS.txt、README.txt
+  （中文：mac 拖入 Applications；Windows 双击 exe；首次运行把内嵌 7-Zip 解压到 %LOCALAPPDATA%\\Unparanoia；
+  WebView2 由 Win11 自带；分段压缩包用法；密码库明文保存说明；未签名提示）。
+- 文档：README 功能表加「分段压缩包（含 .enc 分卷）」「Windows 单 exe（7-Zip 内嵌）」；docs/WINDOWS_BUILD.md 写
+  内嵌机制/缓存路径/首次启动解压/无侧车文件；docs/VERIFICATION.md 记录 Windows 白屏根因（custom-protocol 缺失）
+  与修复验证（strings 内嵌前端串证据），并如实写明「构建后仍需用户在 Windows 11 真机确认」；
+  docs/{BUILD,OUTPUT-LAYOUT,MERGE-MAPPING}.md 更新分卷布局、版本、产物名。哈希留「待 Lead 最终构建回填」。
+- scripts：make-fixtures.sh 增加分卷 fixtures（7zz a -v1m split.7z ... → split.7z.001/002，再用
+  make_enc 生成 split.7z.001.enc/split.7z.002.enc，密码 123；e2e 断言：两卷一起 → 成功解出；
+  只给 .002 → Skipped 且 reason 含「第一卷」；SSEFE 分卷组成功）。e2e-verify.sh 增加对应断言与单 exe 产物存在性。
+- CI：Windows job 加 --features custom-protocol，产物改为单 exe（不再 NSIS/侧车 7z）。
+
+### 8.5 本轮写作用域
+
+Lead：crates/core/**、crates/embedded-7z/**、根 Cargo.toml/Cargo.lock、最终构建与桌面交付、docs/DEV-CONTRACT.md。
+engine-dev：crates/unpack-core/**。app-reader：gui/src-tauri/**。core-reader：crates/cli/**。
+docs-reader：docs/**（除 DEV-CONTRACT）、README.md、scripts/**、.github/**、binaries/README.md、NOTICE。
+gui-frontend：仅在收到 Lead 通知后改 gui/src/**（许可证查看入口/分卷提示可选）。

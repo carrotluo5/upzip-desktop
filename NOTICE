@@ -24,8 +24,12 @@ Copyright (c) 2026 nanase
 - 官方许可证页面：https://www.7-zip.org/license.txt
 - 官方下载页：https://www.7-zip.org/download.html
 
-本项目的应用只把 7-Zip 作为**独立子进程**调用（不链接其 liblzma/7z.dll 代码），
-在 Tauri 打包产物中作为资源文件随附，许可证原文随附于资源目录。
+本项目的应用只把 7-Zip 作为**独立子进程**调用（不链接其 liblzma/7z.dll 代码）。
+macOS 产物在 `.app/Contents/Resources/binaries/mac/` 随附 `7zz` 与许可证；
+Windows 产物（v0.3.1 起为单 exe）用 `include_bytes!` 把 `7z.exe`、`7z.dll`、
+许可证**逐字节内嵌**进 exe，首次运行时解压到用户缓存目录
+`%LOCALAPPDATA%\Unparanoia\embedded-7z\25.01-r1\` 再以子进程调用；许可证原文同时
+内嵌、可用 `unparanoia-cli --licenses` 或 GUI 设置页查看。内嵌不改变上述许可义务。
 
 来源说明（诚实边界）
 --------------------

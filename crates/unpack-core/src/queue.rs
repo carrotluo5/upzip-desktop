@@ -113,10 +113,18 @@ pub async fn run_batch(
     let sem = Arc::new(Semaphore::new(jobs));
     let stopped = Arc::new(AtomicBool::new(false));
 
+    // Split families become one logical task: only the first volume is a 7-Zip
+    // entry point, so sibling volumes must not be queued as separate tasks.
+    let files = crate::split::group_inputs(&files);
+
     let mut handles: Vec<(u64, PathBuf, tokio::task::JoinHandle<TaskOutcome>)> = Vec::new();
     for (idx, file) in files.into_iter().enumerate() {
         let id = (idx + 1) as u64;
-        let size = fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+        // A split family reports the combined size of all discovered volumes.
+        let size = match crate::split::discover(&file) {
+            Some(family) => family.total_bytes,
+            None => fs::metadata(&file).map(|m| m.len()).unwrap_or(0),
+        };
         sink(TaskEvent::TaskQueued {
             id,
             path: file.clone(),

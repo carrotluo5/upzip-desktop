@@ -6,8 +6,9 @@
 #   - Java Oracle 的"真实样本全链路验证"依赖仓库外的官方 Java 源码树与真实样本，
 #     CI 无法运行；CI 只跑可离线回放的 verification/oracle/test-vectors.json
 #     （cargo test --workspace 已包含）。
-#   - Windows job 的 NSIS 打包在 CI 上属于首次真机验证机会；若失败请以日志修配置，
-#     不要把步骤改成忽略错误。
+#   - Windows job 构建的是单 exe 便携 zip（GUI 用裸 cargo 构建，必须带
+#     --features custom-protocol，否则 exe 会连 devUrl localhost:1420 白屏）；
+#     这属于首次真机验证机会，若失败请以日志修配置，不要把步骤改成忽略错误。
 name: build
 
 on:
@@ -80,7 +81,7 @@ jobs:
             target/release/unparanoia-cli
 
   # ---------------------------------------------------------------------------
-  # Windows: 单测 + 前端 + NSIS 安装包（首次真机验证机会）
+  # Windows: 单测 + 单 exe 便携包（首次真机验证机会）
   # ---------------------------------------------------------------------------
   windows:
     name: Windows (x64)
@@ -109,9 +110,12 @@ jobs:
       - name: cargo test (workspace)
         run: cargo test --workspace
 
-      # 先构建前端 dist：Tauri 的 release 打包需要 gui/dist 存在（beforeBuildCommand 也会重建）。
+      # 前端 dist 必须先构建：Tauri 在编译期把 dist 内嵌进 exe（自定义协议）。
       - name: Install frontend deps
         run: pnpm --dir gui install --frozen-lockfile
+
+      - name: Sync bundled 7-Zip resources
+        run: pnpm --dir gui sync:binaries
 
       - name: Build frontend
         run: pnpm --dir gui build
@@ -119,21 +123,43 @@ jobs:
       - name: Build CLI (release)
         run: cargo build --release -p unparanoia-cli
 
+      # 裸 cargo 构建 GUI 必须带 --features custom-protocol；否则 exe 使用 devUrl
+      # http://localhost:1420，在 CI/用户机器上白屏。
+      - name: Build GUI (release, custom-protocol)
+        run: cargo build --release -p unparanoia --features custom-protocol
+
       - name: CLI smoke test
         shell: pwsh
         run: |
           .\target\release\unparanoia-cli.exe --version
           .\target\release\unparanoia-cli.exe doctor
 
-      - name: Build Tauri installer (NSIS)
-        run: pnpm --dir gui tauri build --bundles nsis
+      - name: Package single-exe portable zip
+        shell: pwsh
+        run: |
+          $ver = (Select-String -Path Cargo.toml -Pattern '^\s*version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $pkg = "target/windows-portable/Unparanoia-$ver-win-x64-portable"
+          New-Item -ItemType Directory -Force -Path $pkg | Out-Null
+          Copy-Item target/release/unparanoia.exe "$pkg/Unparanoia.exe"
+          Copy-Item target/release/unparanoia-cli.exe "$pkg/unparanoia-cli.exe"
+          Copy-Item binaries/7z-LICENSE.txt "$pkg/7z-LICENSE.txt"
+          @(
+            "Unparanoia（帕罗诺亚解包器）$ver — Windows x64 便携版（单 exe）",
+            "两个 exe 均已内嵌 7-Zip 25.01；首次运行解压到 %LOCALAPPDATA%\Unparanoia\embedded-7z\25.01-r1\（可用 UNPARANOIA_7Z_CACHE_DIR 覆盖缓存根目录）。",
+            "要求 Windows 10/11 x64 + WebView2 Runtime；免安装；未签 Authenticode。"
+          ) | Set-Content -Encoding UTF8 "$pkg/README.txt"
+          $lines = foreach ($f in Get-ChildItem $pkg -File | Where-Object { $_.Name -ne 'SHA256SUMS' } | Sort-Object Name) {
+            "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 -Path $f.FullName).Hash.ToLower(), $f.Name
+          }
+          $lines | Set-Content -Encoding ASCII "$pkg/SHA256SUMS"
+          Compress-Archive -Path "$pkg/*" -DestinationPath "target/windows-portable/Unparanoia-$ver-win-x64-portable.zip"
 
-      - name: Upload Windows artifacts
+      - name: Upload Windows portable artifacts
         uses: actions/upload-artifact@v4
         with:
           name: unparanoia-windows
           if-no-files-found: warn
           path: |
-            target/release/bundle/nsis/*.exe
+            target/windows-portable/*.zip
             target/release/unparanoia.exe
             target/release/unparanoia-cli.exe

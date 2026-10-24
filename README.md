@@ -8,7 +8,9 @@ v0.2.0 合并为一个产品，v0.3.0 起统一更名为 **Unparanoia（帕罗�
 - 随附 7-Zip 25.01 官方二进制（子进程调用，不注入进程、不链接其代码）
 - 支持批量、拖放、并发、暂停/继续/取消、级联解包、前缀 ZIP 兜底
 - **多密码密码库**（明文保存在本机 config.json，0600）+ **逐层多密码重试**
-- 明暗主题（跟随系统 / 浅色 / 深色）
+- **分段压缩包**（`.7z.001` / `.zip.001` / `.part1.rar`，含 `.enc` 分卷自动聚合）
+- **Windows 单 exe**：GUI/CLI 内嵌 7-Zip 25.01 与前端，不再附带 sidecar
+- 明暗主题（跟随系统 / 浅色 / 深色）、`--licenses` 查看 7-Zip 许可证
 - 不联网；口令只在本机存储（明文 JSON，权限 0600），详见「安全模型」
 
 ## 功能
@@ -22,6 +24,9 @@ v0.2.0 合并为一个产品，v0.3.0 起统一更名为 **Unparanoia（帕罗�
 | 前缀 ZIP（7-Zip 25.01 已知拒绝） | 自动切片/偏移兜底，例如 MP4 头 + ZIP 载荷 |
 | 嵌套级联 | 内层压缩包递归展开，默认深度 4（上限 8），深度耗尽时保留最内层归档 |
 | 逐层多密码重试 | 每层都按完整候选池重试（外层和内层密码不同也能命中）；全部失败才报"需要密码" |
+| 分段压缩包 | `.7z.001`/`.zip.001`/`.part1.rar` 同族卷自动聚合为一个任务；只给非首卷会明确提示补第一卷；`.enc` 分卷逐卷解密后再按 7-Zip 分卷解 |
+| Windows 单 exe | 0.3.1 起 GUI/CLI 内嵌 7-Zip 25.01 与前端资源，首次运行解压到 `%LOCALAPPDATA%\Unparanoia\embedded-7z\25.01-r1\`（可用 `UNPARANOIA_7Z_CACHE_DIR` 覆盖） |
+| 许可证查看 | `unparanoia-cli --licenses`、GUI 设置页「7-Zip 许可证」 |
 | 密码库（密码管理页） | 多密码明文保存在本机 `config.json`（0600），GUI「密码」页增删/清空、可切换显示掩码 |
 | 明暗主题 | 设置页可选 跟随系统 / 浅色 / 深色，跟随系统时监听系统配色并实时切换 |
 | 智能输出布局 | 单条目直接摊开、多条目自动建文件夹（smart/folder/direct） |
@@ -58,6 +63,9 @@ $CLI detect 文件.enc                          # 只识别，不写盘
 $CLI inspect 文件.enc                         # 打印 SSEFE 头（版本/算法/KDF 参数/salt）
 $CLI run 文件.enc -p 口令 -o 输出目录           # 解密 + 解内层
 $CLI run 一批文件... -p 口令 --jobs 4 --layout smart --conflict rename --json
+$CLI run 3138.7z.001.enc 3138.7z.002.enc -p 口令 -p 内层口令   # .enc 分卷组自动聚合
+$CLI run 包.7z.001 -p 口令                    # 普通分卷：同目录其余卷由 7-Zip 自动读取
+$CLI --licenses                               # 查看内嵌/随包 7-Zip 许可证
 
 # 密码库（config.json 中的多密码，明文保存）
 $CLI config --list-passwords                 # 列出密码库（默认掩码，见 --show 说明）
@@ -99,6 +107,8 @@ $CLI cleanup-staging --root ~/Downloads      # 清理 .unparanoia-tmp-* 残留
   出现 `reqwest`/`hyper`（被禁用/未调用），`cargo tree -i reqwest` 可核查。
 - 7-Zip 以子进程运行，输入文件只读；恶意压缩包仍可能触发 7-Zip 自身漏洞——
   请保持 7-Zip 版本更新（本仓库固定 25.01，升级方法见 `binaries/README.md`）。
+- Windows 单 exe 内嵌 7-Zip 二进制：首次运行会解压到用户缓存目录，之后复用；
+  内嵌字节与 `binaries/win/` 完全一致，许可证可随时用 `--licenses` 查看。
 
 ## 配置与数据位置
 
@@ -115,6 +125,8 @@ CLI 的 `config --path` / `doctor` 会打印实际路径。旧目录 `paranoia-e
 
 - 默认 smart：解出 1 个顶层条目 → 直接摊在输出目录；≥2 个 → 建 `<归档名>/`。
 - `<归档名>` 去掉一个扩展名（`.enc`/`.zip`/`.7z`…）并清洗非法字符。
+- 分段压缩包：`3138.7z.001` + `3138.7z.002`（或对应 `.enc`）聚合为**一个任务**，
+  输出到 `3138/`；只给非首卷时跳过并提示「请添加第一卷」，缺后续卷时明确报错且不留半成品。
 - 冲突默认 rename：`hello.txt` → `hello (1).txt`（沿用旧版 paranoia 的 `(n)` 风格；
   upzip 基线是 `hello_1.txt`，合并时选了前者）；目录冲突整个改名，不与旧目录交叉合并。
 - 临时目录/残留/失败策略详见 [docs/OUTPUT-LAYOUT.md](docs/OUTPUT-LAYOUT.md)。
@@ -129,15 +141,19 @@ CLI 的 `config --path` / `doctor` 会打印实际路径。旧目录 `paranoia-e
 
 依赖与产物细节见 [docs/BUILD.md](docs/BUILD.md) 和
 [docs/WINDOWS_BUILD.md](docs/WINDOWS_BUILD.md)。注意本仓库是单一 Cargo workspace，
-产物在**仓库根** `target/release/`。v0.3.0 最终构建的产物体积/SHA-256 见
+产物在**仓库根** `target/release/`。v0.3.1 最终构建的产物体积/SHA-256 见
 [docs/VERIFICATION.md](docs/VERIFICATION.md) §7（每次重建会变）。
 
 ## 验证（诚实版）
 
-- `cargo test --workspace`：**91 通过 / 0 失败 / 2 ignored**（core 43 + oracle 向量 1 +
-  unpack-core 47；2 个 ignored 的测试需要真实样本）。
-- `./scripts/e2e-verify.sh`：**75 项 CLI e2e 全部通过**（合成 fixture，覆盖 SSEFE、
-  加密 7z、前缀 ZIP、级联、逐层多密码、密码库、冲突、JSON、错误口令、清理等）。
+- `cargo test --workspace`：**107 通过 / 0 失败 / 2 ignored**（core 43 + oracle 向量 1 +
+  embedded-7z 3 + unpack-core 60；2 个 ignored 的测试需要真实样本）。
+- `./scripts/e2e-verify.sh`：**91 项 CLI e2e 全部通过**（合成 fixture，覆盖 SSEFE、
+  加密 7z、前缀 ZIP、级联、逐层多密码、密码库、冲突、JSON、错误口令、清理、
+  普通分卷 / `.enc` 分卷 / 缺卷 / 只给非首卷等）。
+- 分段压缩包另在真实样本 `3138.7z.001.enc`+`.002.enc`（Paranoia 口令 123、内层 7z
+  口令 anzixin）上由 Lead 手工复验：合并 1 个任务、输出 `3138/`（5 文件，352.85 MiB），
+  只给首卷自动发现、只给非首卷跳过、缺卷失败，详见 VERIFICATION.md §8。
 - 真实样本 `3138.7z.001.enc`/`.002.enc`（密码 123）曾在 2026-10-23 通过**独立 Java
   Oracle** 全链路验证（MAC/checkcode/ZIP CRC/明文 SHA-256/`cmp` 全部一致）。
   但该验证**当前不可重跑**（Oracle 前置与原始明文文件已不在本机），仓库里只有
@@ -149,7 +165,8 @@ CLI 的 `config --path` / `doctor` 会打印实际路径。旧目录 `paranoia-e
 
 ```text
 crates/core/            Paranoia 格式、KDF、AES-CTR、BLAKE3 MAC、SSEFE 解密、内层 ZIP 解压、密码库
-crates/unpack-core/     检测、7-Zip 封装、布局/冲突、队列、嵌套、逐层多密码、settings/processed、SSEFE 探测
+crates/unpack-core/     检测、7-Zip 封装、布局/冲突、队列、嵌套、逐层多密码、分段压缩包、settings/processed、SSEFE 探测
+crates/embedded-7z/     Windows 单 exe 内嵌的 7-Zip 25.01（ensure_7z/离线缓存/许可证文本）
 crates/cli/             unparanoia-cli（detect/inspect/run/config/doctor/cleanup-staging）
 gui/                    React + Vite 前端（队列/日志/密码/设置）
 gui/src-tauri/          Tauri v2 后端（命令/事件/打包配置）
@@ -168,7 +185,7 @@ docs/                   FORMAT / CORE_API / OUTPUT-LAYOUT / BUILD / WINDOWS_BUIL
 - [docs/BUILD.md](docs/BUILD.md) / [docs/WINDOWS_BUILD.md](docs/WINDOWS_BUILD.md) — 构建
 - [docs/VERIFICATION.md](docs/VERIFICATION.md) — 验证证据与未验证清单
 - [docs/oracle-report.md](docs/oracle-report.md) — 真实样本 Oracle 验证历史记录
-- [docs/MERGE-MAPPING.md](docs/MERGE-MAPPING.md) — 与两个前身的功能映射及 v0.3.0 增量
+- [docs/MERGE-MAPPING.md](docs/MERGE-MAPPING.md) — 与两个前身的功能映射及 v0.3.0/v0.3.1 增量
 - [docs/DEV-CONTRACT.md](docs/DEV-CONTRACT.md) — v0.3.0 内部接口契约（开发用）
 
 ## 版本与行为差异（有意）
@@ -178,6 +195,7 @@ docs/                   FORMAT / CORE_API / OUTPUT-LAYOUT / BUILD / WINDOWS_BUIL
 | v0.1.x | 只解密 `.enc`；单密码；静态 HTML 前端 |
 | v0.2.0 | 合并 unparanoia + upzip：批量解压、伪装压缩包、级联、并行、settings/processed；单密码明文记忆 |
 | v0.3.0 | 更名 **Unparanoia（帕罗诺亚解包器）**；密码库（多密码明文）+ 密码管理页；逐层多密码重试；明暗主题；新图标；配置/env/事件更名（旧名兼容读取） |
+| v0.3.1 | 分段压缩包（普通卷 + `.enc` 分卷）；Windows 改为**单 exe**（内嵌 7-Zip 与前端）；修复 Windows GUI 白屏（`--features custom-protocol`）；`--licenses`/GUI 许可证查看；版本号 0.3.1 |
 
 升级注意：
 
@@ -189,7 +207,7 @@ docs/                   FORMAT / CORE_API / OUTPUT-LAYOUT / BUILD / WINDOWS_BUIL
 | 环境变量 | `PARANOIA_ENC_*` | `UNPARANOIA_*`（旧名仅回退读取；`UPZIP_7Z` 仍兼容） |
 | 嵌套密码 | 每层单独试单个密码，失败即放弃 | 每层重走完整候选池，全部失败才报需要密码 |
 | 冲突重命名 | `hello (1).txt` | 不变 |
-| 范围 | 解密 `.enc` + 批量解压 | 不变（+ 密码库/主题） |
+| 范围 | 解密 `.enc` + 批量解压 | 不变（+ 密码库/主题/分卷） |
 
 ## 许可证
 
@@ -202,6 +220,8 @@ docs/                   FORMAT / CORE_API / OUTPUT-LAYOUT / BUILD / WINDOWS_BUIL
 - 加密头部的归档在无口令时无法枚举内容（只能报告"需要密码"）。
 - 7-Zip 25.01 对"前缀 ZIP"的拒绝已用切片兜底，但其它版本的 7-Zip 行为可能不同。
 - 带口令的安装器（InstallShield/Inno/NSIS）内嵌文件不在支持范围。
-- 未在真实 Windows 上运行验证；Windows 便携版仅交叉编译产出。
+- 未在真实 Windows 上运行验证；Windows 便携版仅交叉编译产出（静态证据见 VERIFICATION.md §9）。
+- 分段压缩包必须从第一卷开始（`.001` / `.part1.rar`）；缺后续卷会明确报错，不会输出半成品。
+- Windows 单 exe 首次运行需写入用户缓存目录（`%LOCALAPPDATA%\Unparanoia\`）。
 - 密码库是明文存储（0600 仅 Unix 生效），不是加密保险箱。
 - 不做自动更新、云同步、历史记录、硬暂停（暂停是协作式，进行中的 7-Zip 子进程会跑完当前任务段）。

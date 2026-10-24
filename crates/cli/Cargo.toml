@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 unparanoia-core = { workspace = true }
+unparanoia-embedded-7z = { workspace = true }
 unparanoia-unpack-core = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
