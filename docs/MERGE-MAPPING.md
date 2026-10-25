@@ -1,8 +1,8 @@
-# 合并映射：upzip → Unparanoia（v0.2.0 合并 + v0.3.0/v0.3.1/v0.3.2 增量）
+# 合并映射：upzip → Unparanoia（v0.2.0 合并 + v0.3.0–v0.3.3 增量）
 
 > 本文记录 **upzip**（批量解压伪装压缩包，Tauri 2 + Rust）如何合并进
 > **unparanoia**（Paranoia File Encryption v4 `.enc` 解密器），以及 v0.3.0 更名
-> **Unparanoia（帕罗诺亚解包器）**、v0.3.1/v0.3.2 增量后的变化。upzip 源码位于
+> **Unparanoia（帕罗诺亚解包器）**、v0.3.1/v0.3.2/v0.3.3 增量后的变化。upzip 源码位于
 > /Volumes/Carrot/AppPorts/hermes/upzip，这里只记录迁移决策；代码本体已进入
 > crates/unpack-core、crates/cli、gui/。
 >
@@ -125,5 +125,17 @@ v0.3.0 的用户需求是「独立密码管理页、多密码明文保存」，�
 | Windows 无控制台闪窗 + 错误细节 | `crates/unpack-core/src/sevenzip.rs` | Windows `CREATE_NO_WINDOW`；失败信息含 7z 路径/退出码/stderr 尾部（≤1000 字符）；spawn 锁文件错误 5/32/225 重试 3 次 |
 | 日志落盘 + 诊断 | `gui/src-tauri/src/lib.rs`（`unparanoia.log`、`append_log`、`diagnostics`）+ `gui/src/App.tsx` | 日志 `<configDir>/logs/unparanoia.log`（>2 MiB 轮转）；设置页「诊断信息」（复制诊断 JSON/打开日志目录/清除处理记录） |
 | 测试与产物 | `scripts/e2e-verify.sh` + docs | e2e 91→104（新增默认不跳过/--skip-processed/related_paths/清除记录后重跑）；测试 107→114（unpack-core 65 + GUI lib 2）；产物 `Unparanoia_0.3.2_aarch64.dmg` / `Unparanoia-0.3.2-win-x64-portable.zip`，哈希见 VERIFICATION.md §7 |
+
+## 8. v0.3.3 增量（纯 GUI 修复：进度条布局 / 密码框输入法）
+
+> v0.3.3 只改 `gui/src/App.tsx`、`gui/src/App.css` 两个前端文件；Rust/CLI/引擎/
+> 打包配置均无改动（版本号与 e2e 断言除外）。无新增依赖、无新增后端命令。
+
+| 需求 | 实现位置 | 说明 |
+|---|---|---|
+| 主进度条不再被右侧活动文本挤动 | `gui/src/App.css`（`.batchprog`/`.activity`/`.progress.big`） | Windows 11 反馈：单行 flex 中活动文本随文件名/路径长短伸缩，进度条忽长忽短。改为两行布局：进度条 `width:100%` 独占一行（宽度只随窗口变化），活动文本 `.activity` 另起一行、行内省略；JSX 未改。WKWebView 量化：旧布局 1022→714.73 px，新布局 1080→1080 px |
+| 密码框支持输入法直接键入中文 | `gui/src/App.tsx`（`CSS_MASK_SUPPORTED` 常量 + 两处密码输入框）+`gui/src/App.css`（`.masked`） | 原 `type="password"` 在 Windows WebView2 下中文输入法无法直接键入。改为 `type="text"` + `-webkit-text-security: disc` 掩码（`CSS.supports` 检测，不支持自动回退 `type="password"`）；密码管理页 placeholder 改为「添加密码（可直接键入中文；明文保存，仅存本机）」 |
+| 验证 | `pnpm --dir gui build`；Swift + WKWebView 最小页面 | `pnpm --dir gui build` exit 0；WKWebView 下 `CSS.supports`=true、掩码渲染为圆点；进度条宽度量化见 VERIFICATION.md §5a。真机 Windows 待用户验证（§10） |
+| 版本与产物 | 根 `Cargo.toml`/`gui/package.json`/`gui/src-tauri/tauri.conf.json`/`scripts/e2e-verify.sh` | 0.3.3；`Unparanoia_0.3.3_aarch64.dmg`、`Unparanoia-0.3.3-win-x64-portable.zip`，哈希见 VERIFICATION.md §7 |
 
 

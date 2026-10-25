@@ -1,9 +1,11 @@
 # 构建（BUILD）— macOS / Linux
 
-本文讲 **Unparanoia 0.3.2** 的构建与产物；Windows 详见 [WINDOWS_BUILD.md](WINDOWS_BUILD.md)。
+本文讲 **Unparanoia 0.3.3** 的构建与产物；Windows 详见 [WINDOWS_BUILD.md](WINDOWS_BUILD.md)。
 0.3.1 起 Windows 便携包改为**单 exe**（GUI/CLI 内嵌 7-Zip 与前端，不再附 sidecar）；
 0.3.2 起“跳过已处理”默认关闭（旧配置一次性迁移），并新增日志落盘/诊断信息与
 Windows 无控制台窗口（详见 [VERIFICATION.md](VERIFICATION.md) §6/§8/§9）。
+0.3.3 是纯 GUI 前端修复（主进度条布局、密码输入框支持输入法直接键入中文），
+构建流程、产物类型与 Rust/CLI/引擎代码均不变。
 项目是单个 Cargo workspace + 一个 Vite/React 前端，`gui/src-tauri` 是 workspace 成员，
 所以**所有 Rust 产物都在仓库根目录的 `target/` 下**（不是 `gui/src-tauri/target`，
 旧版文档里那个路径已过时）。
@@ -30,7 +32,7 @@ Windows 无控制台窗口（详见 [VERIFICATION.md](VERIFICATION.md) §6/§8/�
 
 1. 环境检查（cargo/node/pnpm、Xcode CLT、`binaries/mac/7zz` 存在）；
 2. `cargo test --workspace` —— core 单测 + oracle 向量回放 + embedded-7z 单测 +
-   unpack-core 单测 + GUI lib 单测（v0.3.2 当前 114 通过 / 0 失败 / 2 ignored，最终以
+   unpack-core 单测 + GUI lib 单测（v0.3.3 当前 114 通过 / 0 失败 / 2 ignored，最终以
    VERIFICATION.md §2 为准；`real_sample` 2 个需要真实样本的测试默认 ignored）；
 3. `pnpm --dir gui install --frozen-lockfile`；
 4. `pnpm --dir gui tauri build`（`beforeBuildCommand` 自动跑
@@ -96,19 +98,19 @@ pnpm --dir gui tauri dev      # 起 Vite dev server + Tauri 窗口，改前端�
 
 ## 7. 实测记录与已知环境问题
 
-**v0.3.2 最终构建记录（2026-10-24，macOS 27.2 arm64 本机，
+**v0.3.3 最终构建记录（2026-10-25，macOS 27.2 arm64 本机，
 `./scripts/build.sh` exit 0；其中 `cargo test --workspace` = 114 passed / 0 failed /
 2 ignored）**：
 
 | 产物 | 大小 (B) | SHA-256 |
 |---|---|---|
-| `target/release/bundle/dmg/Unparanoia_0.3.2_aarch64.dmg` | 8,248,449 | `1f5294ca65bdde5c369a8e7d77bf44c67d626e06ab49b15b73e35c9cf5254db3` |
-| `.app` 主二进制 = `target/release/unparanoia` | 7,431,152 | `d147d2f5200b48d9fa0efb25205f242d23edff860efc1d8100e74c4db0a74da5` |
-| `target/release/unparanoia-cli` | 2,789,168 | `6e25b1a5c32607ef2a8d6038c6cde3dd569e58865fe36470a108af28a5101759` |
+| `target/release/bundle/dmg/Unparanoia_0.3.3_aarch64.dmg` | 8,248,513 | `1b50257d922152e55586d988205d9a3b836a0031d25b62094a5eaff36e22a7e9` |
+| `.app` 主二进制 = `target/release/unparanoia` | 7,431,168 | `88c69ed211338d1e5e86c8858836760f752151c1b405ea629c8bcc72af31980f` |
+| `target/release/unparanoia-cli` | 2,789,168 | `eca12ea0b1200b2bab9fc362ede5d94b2c0f0ba63b256549473bc6df12fc5e81` |
 
-DMG 挂载复验通过：含 `Applications` 链接与 `Unparanoia.app`（0.3.2、
+DMG 挂载复验通过：含 `Applications` 链接与 `Unparanoia.app`（0.3.3、
 `com.nanase.unparanoia`、minOS 12.0），`Contents/Resources/binaries/mac/7zz` 存在且哈希
-与 `binaries/mac/7zz` 一致；CLI `--version` 输出 `unparanoia-cli 0.3.2`。`.app` 仍为
+与 `binaries/mac/7zz` 一致；CLI `--version` 输出 `unparanoia-cli 0.3.3`。`.app` 仍为
 ad-hoc 签名（`codesign --verify --deep --strict` 失败），不能直接分发。
 
 v0.3.2 行为注意：**跳过已处理默认关闭**（旧 `settings.json` 一次性迁移为关闭），
@@ -135,6 +137,6 @@ rm -f target/release/bundle/macos/Unparanoia_<version>_aarch64.dmg \
       target/release/bundle/macos/rw.*.dmg
 ```
 
-清掉残留后重跑 `pnpm --dir gui tauri build --bundles dmg` 即可成功（v0.3.2 最终构建已
+清掉残留后重跑 `pnpm --dir gui tauri build --bundles dmg` 即可成功（v0.3.2/v0.3.3 最终构建已
 按此修复产出上表 DMG），无需 workaround、无需改代码。通用建议仍是：
 同一工作区串行构建，避免构建被中断后留下半成品。

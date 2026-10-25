@@ -1,4 +1,4 @@
-# 验证（VERIFICATION）— v0.3.2
+# 验证（VERIFICATION）— v0.3.3
 
 > 结论先行：**本机可复现的自动测试 `cargo test --workspace` 114 通过 / 0 失败 / 2 ignored，
 > CLI e2e 104 项全绿（ALL E2E CHECKS PASSED）**。真实 Paranoia 样本的
@@ -6,8 +6,10 @@
 > 跑过并通过，但当前机器无法重跑（缺少 Oracle 前置与原始明文）。v0.3.1 的**分卷压缩包**
 > 在合成 fixture（e2e）与**真实样本 3138.7z.001/002.enc（Lead 手工复验）**上均验证；
 > v0.3.2 的**跳过已处理默认关闭 / 分卷行归并（`related_paths`）/ Windows 无控制台窗口 /
-> 日志落盘与诊断信息**已在本机（macOS 运行 + 单测 + e2e）验证；Windows GUI 单 exe 仍只做了
-> 交叉编译与静态证据，**未在真实 Windows 上启动**。
+> 日志落盘与诊断信息**已在本机（macOS 运行 + 单测 + e2e）验证；v0.3.3 的**主进度条布局 /
+> 密码框输入法**用 Swift + WKWebView 最小页面做了量化验证（见 §5a），但**未在真实 Windows
+> （WebView2 + 中文输入法）上验证**；Windows GUI 单 exe 仍只做了交叉编译与静态证据，
+> **未在真实 Windows 上启动**。
 > 本文严格区分「本机已验证」「历史记录」「断言但未验证」，不把三者混为一谈。
 
 ## 1. 环境
@@ -29,7 +31,7 @@
 cargo test --workspace
 ```
 
-2026-10-24 v0.3.2 最终构建前实测（exit 0；重建后再跑以实际输出为准）：
+2026-10-24 v0.3.3 最终构建前实测（exit 0；重建后再跑以实际输出为准）：
 
 | target | 通过 | 失败 | ignored | 内容 |
 |---|---|---|---|---|
@@ -40,7 +42,7 @@ cargo test --workspace
 | `unparanoia_lib`（GUI unit） | 2 | 0 | 0 | `civil_from_days_matches_known_epoch_days`、`shorten_only_appends_ellipsis_when_cut` |
 | `tests/real_sample.rs` | 0 | 0 | **2** | 真实样本解密（需环境变量，见 §5） |
 | CLI / GUI main / doc-tests | 0 | 0 | 0 | 无测试 |
-| **合计** | **114** | **0** | **2** | 2026-10-24 v0.3.2 实测；耗时约 3.5 s（release 构建另计） |
+| **合计** | **114** | **0** | **2** | 2026-10-24 v0.3.3 实测（与 v0.3.2 相同，GUI 修复不涉及 Rust）；耗时约 3.5 s（release 构建另计） |
 
 `oracle_vectors` 的比对范围（`crates/core/tests/oracle_vectors.rs:82-103`）：
 header raw/version/algorithm/customParams、salt、Argon2 t/m/p/output_len、
@@ -108,16 +110,35 @@ cargo test -p unparanoia-core --test real_sample -- --ignored
 - 注意：`PARANOIA_SAMPLE_ENC` 是**单个**文件（测试 2 会复制成两份），
   不是目录。
 
+## 5a. v0.3.3 GUI 修复的量化验证（Swift + WKWebView，本机）
+
+v0.3.3 只改前端（`gui/src/App.tsx`、`gui/src/App.css`），用 Swift + WKWebView 最小页面
+（/tmp 临时 harness，未入库）在 macOS 上量化验证；真机 Windows/WebView2 仍待用户验证。
+
+**① 主进度条布局**（`.batchprog`）：旧单行 flex 布局中活动文本按内容伸缩，进度条宽度随
+文本长短变化（同一页面实测 `1022 px → 714.73 px`，被挤短 `307.27 px`）；新两行布局
+（进度条 `width:100%` 独占一行，活动文本另起一行省略）在同样文本变化下恒为 `1080 px`
+（1100 px 容器扣除左右各 10 px padding），容器高 57 px（进度条 22 px + gap 4 px + 文本行 16 px）。
+
+**② 密码框输入法**：`CSS.supports("-webkit-text-security","disc")` 在 WKWebView 返回
+`true`，`getComputedStyle` 的 `-webkit-text-security` 为 `disc`，ASCII 与中文密码均渲染为
+圆点（快照 /tmp/textsec-test.png）；因此密码框在支持的 WebView 上用 `type="text"` + 掩码，
+中文输入法可直接键入；不支持时回退 `type="password"`。**真机 Windows WebView2 的
+中文输入法行为未验证**（见 §10）。
+
+**③ 构建**：`pnpm --dir gui build` exit 0（tsc + vite，24 modules，CSS 13.39 kB /
+gzip 3.42 kB，JS 283.31 kB / gzip 85.77 kB）。
+
 ## 6. CLI 端到端（e2e，本机可复现）
 
 ```bash
 ./scripts/make-fixtures.sh     # 生成 testdata/fixtures/（需要 binaries/mac/7zz；结构可复现，非字节稳定）
-./scripts/e2e-verify.sh        # 2026-10-24 v0.3.2: 104 项检查全部通过，最后一行 ALL E2E CHECKS PASSED
+./scripts/e2e-verify.sh        # 2026-10-24 v0.3.3: 104 项检查全部通过，最后一行 ALL E2E CHECKS PASSED
 ```
 
 覆盖（`scripts/e2e-verify.sh`，独立临时配置目录，不碰真实配置）：
 
-1. `--version` 含 0.3.2；`doctor` 报告 7-Zip；`--help` 列出子命令；
+1. `--version` 含 0.3.3；`doctor` 报告 7-Zip；`--help` 列出子命令；
    `--licenses` 输出内嵌/随包 7-Zip 许可证（含 unRAR 限制文字）；
 2. `detect --json` 识别 `ssefe_encrypted` / `masked_archive`；`inspect` 显示 SSEFE 头；
 3. `sample.enc`（SSEFE，pw 123）解密出 `hello.txt`（fixture 内容为
@@ -170,52 +191,56 @@ fixture 内容（`testdata/fixtures/`，gitignored；每次生成 mtime/salt 不
 `split.7z.001.enc..004.enc`（每卷分别被 Paranoia v4 加密，SSEFE 分卷组）、
 `truncated.7z.001.enc`（只有首卷，用于缺卷失败用例）、`SHA256SUMS`。
 
-## 7. 构建产物（v0.3.2 最终记录：2026-10-24）
+## 7. 构建产物（v0.3.3 最终记录：2026-10-25）
 
 > **状态：由 Lead 在代码冻结后执行最终构建。** macOS `./scripts/build.sh` exit 0
 > （其中 `cargo test --workspace` = 114 passed / 0 failed / 2 ignored）；
 > Windows 便携版 `./scripts/build-windows-portable.sh` exit 0
 > （cargo-xwin，仅有 LNK4099 PDB 警告，与产物无关）。产物路径均在 workspace 根 `target/`。
 > 每次重建（即使源码相同）哈希都会变；重建后必须更新本表。本表数值在构建后由
-> docs-reader 在磁盘上逐项复核（大小 + SHA-256 + DMG 挂载 + zip 内容列表）。
+> Lead 在磁盘上逐项复核（大小 + SHA-256 + DMG 挂载 + zip 内容列表 + 内嵌 7-Zip 字节检测）。
 
 | 产物 | 大小 (B) | SHA-256 |
 |---|---|---|
-| `target/release/bundle/dmg/Unparanoia_0.3.2_aarch64.dmg` | 8,248,449 | `1f5294ca65bdde5c369a8e7d77bf44c67d626e06ab49b15b73e35c9cf5254db3` |
-| `.app` 内主二进制（`bundle/macos/Unparanoia.app/Contents/MacOS/unparanoia`） | 7,431,152 | `d147d2f5200b48d9fa0efb25205f242d23edff860efc1d8100e74c4db0a74da5` |
-| GUI 裸二进制 `target/release/unparanoia` | 7,431,152 | `d147d2f5…`（与 .app 内相同） |
-| CLI `target/release/unparanoia-cli` | 2,789,168 | `6e25b1a5c32607ef2a8d6038c6cde3dd569e58865fe36470a108af28a5101759` |
-| Windows 便携 zip `target/windows-portable/Unparanoia-0.3.2-win-x64-portable.zip` | 7,160,723 | `465490d7311a1aad4328baf825d0807f9d62d6559e54ff13274c1ae457cc2254` |
-| zip 内 GUI `Unparanoia.exe`（PE32+ GUI x86-64） | 13,758,464 | `e1c18e51e39aacb186a945ae8efcbbbd7c7008ba9224a32c166feba283fbdf99` |
-| zip 内 CLI `unparanoia-cli.exe`（PE32+ console x86-64） | 6,211,584 | `ee54556a1c24a79dadedcd25496174e627aa0f0c2fafd953d3332920551c2fa1` |
+| `target/release/bundle/dmg/Unparanoia_0.3.3_aarch64.dmg` | 8,248,513 | `1b50257d922152e55586d988205d9a3b836a0031d25b62094a5eaff36e22a7e9` |
+| `.app` 内主二进制（`bundle/macos/Unparanoia.app/Contents/MacOS/unparanoia`） | 7,431,168 | `88c69ed211338d1e5e86c8858836760f752151c1b405ea629c8bcc72af31980f` |
+| GUI 裸二进制 `target/release/unparanoia` | 7,431,168 | `88c69ed2…`（与 .app 内相同） |
+| CLI `target/release/unparanoia-cli` | 2,789,168 | `eca12ea0b1200b2bab9fc362ede5d94b2c0f0ba63b256549473bc6df12fc5e81` |
+| Windows 便携 zip `target/windows-portable/Unparanoia-0.3.3-win-x64-portable.zip` | 7,161,869 | `d4a857a91dd2c18c1b5a779db7235624dad550626458f0e91a82bbea21c01a04` |
+| zip 内 GUI `Unparanoia.exe`（PE32+ GUI x86-64） | 13,758,976 | `d700683abfbf4c984698f755927d4da1cc618bd4c30279bb2307c27447cb7b42` |
+| zip 内 CLI `unparanoia-cli.exe`（PE32+ console x86-64） | 6,211,584 | `58d93cf37d277ccc2d8aff53d2da1fbb5d6e9a07f09e1221857bfdf5e73ddb2e` |
 | zip 内 `7z-LICENSE.txt` | 6,029 | 与 `binaries/7z-LICENSE.txt` 一致（`99df5a51…`） |
 
 当次核对（Lead 构建 + docs-reader 磁盘复核）：
 
 - DMG 以 `hdiutil attach -readonly` 挂载成功，含 `Applications` 链接与
-  `Unparanoia.app`（`CFBundleShortVersionString`=0.3.2、
+  `Unparanoia.app`（`CFBundleShortVersionString`=0.3.3、
   `CFBundleIdentifier`=com.nanase.unparanoia、minOS 12.0）；`.app` 主二进制与
   裸二进制 SHA-256 一致；`Contents/Resources/binaries/mac/7zz` 存在且哈希与
   `binaries/mac/7zz` 一致（`5c2fd36f…`）；detach 正常。`unparanoia-cli --version`
-  输出 `unparanoia-cli 0.3.2`。
+  输出 `unparanoia-cli 0.3.3`。
 - Windows 便携 zip 用 `7zz l` 核对为 **5 个文件 + 1 个顶层目录**
-  `Unparanoia-0.3.2-win-x64-portable/`（`Unparanoia.exe`、`unparanoia-cli.exe`、
+  `Unparanoia-0.3.3-win-x64-portable/`（`Unparanoia.exe`、`unparanoia-cli.exe`、
   `7z-LICENSE.txt`、`README.txt`、`SHA256SUMS`；**无** 7z.exe/7z.dll 侧车）；
-  `SHA256SUMS` 与上表一致（Lead 解压后 `shasum -c` 全部 OK）。
+  `SHA256SUMS` 与上表一致（Lead 解压后 `shasum -c` 全部 OK）。对两个 exe 做
+  python 字节检测：7z.exe 头部、7z.dll 头部、`7z-LICENSE.txt` 全文均在，且 GUI
+  exe 含 `tauri://localhost`（custom-protocol 前端资源已内嵌），证实「单 exe 可运行、
+  无 sidecar」。
 - `codesign --verify --deep --strict` 对 .app **仍失败**（"code has no resources but
   signature indicates they must be present"），即产物为 ad-hoc 签名、不可直接分发；
   分发前必须用 Developer ID 重签并公证。
 
-**GUI 启动冒烟（人工，2026-10-24 v0.3.2 最终构建后由 Lead 执行，通过）**：
+**GUI 启动冒烟（人工，2026-10-25 v0.3.3 最终构建后由 Lead 执行，通过）**：
 `open ./target/release/bundle/macos/Unparanoia.app` 进程存活；`CGWindowList`
 查到窗口 owner=`Unparanoia`、title=「Unparanoia 解包器 — 批量解密/解压」、
 尺寸 1120x780。启动后 GUI 日志实际落盘：
 `~/Library/Application Support/unparanoia/logs/unparanoia.log`（启动即写 4 行，
-含 7-Zip 路径/版本/来源）。解锁桌面并激活窗口后已抓取实际界面截图
-`docs/screenshots/gui-0.3.2.png`（2240×1560 px，1120×780 pt @2x，截自最终产物）：
-可见顶栏「Unparanoia」+ 版本 0.3.2、内嵌 7-Zip 25.01 横幅、配置文件路径、
-队列/日志/密码/设置四个 tab 与空队列提示；界面与 v0.3.0 布局相同（v0.3.1 新增
-设置页「7-Zip 许可证」入口，v0.3.2 新增设置页「诊断信息」与日志入口）。
+含 7-Zip 路径/版本/来源；本次确认追加「应用启动：版本 0.3.3」）。激活窗口后已抓取
+实际界面截图 `docs/screenshots/gui-0.3.3.png`（2240×1560 px，1120×780 pt @2x，
+截自最终产物）：可见顶栏「Unparanoia」+ 版本 0.3.3、内嵌 7-Zip 25.01 横幅、
+配置文件路径、队列/日志/密码/设置四个 tab 与空队列提示；界面与 v0.3.0 布局相同
+（v0.3.1 新增设置页「7-Zip 许可证」入口，v0.3.2 新增设置页「诊断信息」与日志入口，
+v0.3.3 为纯布局/输入法修复，界面结构不变）。
 边界：仅启动级冒烟；交互式切页/拖放/暂停取消未做（尝试 System Events 自动化时
 accessibility 被系统拒绝，错误 -25208），**不等于**完整 GUI 交互测试（见 §10）。
 
@@ -314,6 +339,8 @@ macOS 日志实测）；**未在真实 Windows 11 上启动 GUI/CLI**，未验�
 | 日志轮转（>2 MiB → `.1`） | 代码实现并有 GUI 日志落盘实测，但未做触发轮转的容量实测 |
 | 分卷队列行归并（`related_paths`）的 GUI 呈现 | CLI e2e 已断言 `related_paths` 4 卷；GUI 行归并/全跳过提示条未做交互自动化 |
 | Windows 真实运行、WebView2、中文路径、单 exe 首次解压缓存、无控制台窗口 | 未验证（用户将在真机验证）；v0.3.2 的 CREATE_NO_WINDOW / spawn 重试 / 错误细节仅有单测与静态证据 |
+| v0.3.3 主进度条布局（不再被活动文本挤动） | 已用 Swift + WKWebView 最小页面量化（旧布局 1022→714.73 px，新布局恒 1080 px）；**未在 macOS GUI 真实拖放/解压中截图复验**，Windows 真机未验证 |
+| v0.3.3 密码框输入法直接键入中文 | WKWebView 下 `-webkit-text-security: disc` 与 `CSS.supports` 验证通过（ASCII/中文均渲染圆点）；**Windows WebView2 + 中文输入法未验证**，由用户真机复验 |
 | Windows NSIS 安装包 | 路线存在（`scripts/build-windows.ps1`）但未构建、未验证；正式交付走单 exe 便携版 |
 | DMG 安装体验/签名/公证 | 未签名、未公证；codesign 校验失败 |
 | CI（.github/workflows/build.yml） | 仓库无远端，workflow 从未在 GitHub 上跑过；本地仅手工执行同等命令 |

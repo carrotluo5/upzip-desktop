@@ -168,6 +168,17 @@ const DEFAULT_SETTINGS: Settings = {
   settingsVersion: 2,
 };
 
+/* Windows WebView2 中 type="password" 不接受输入法直接键入（中文只能粘贴）。
+   改用 type="text" + CSS -webkit-text-security 掩码（WebKit/Chromium 均支持）；
+   若引擎不支持该属性则回退到 type="password"，避免密码明文显示。 */
+const CSS_MASK_SUPPORTED = (() => {
+  try {
+    return typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("-webkit-text-security", "disc");
+  } catch {
+    return false;
+  }
+})();
+
 const BACKSLASH = String.fromCharCode(92);
 
 function basename(p: string): string {
@@ -1398,8 +1409,8 @@ export default function App() {
         </label>
         <input
           id="pw-input"
-          className="pwinput"
-          type="password"
+          className={"pwinput" + (CSS_MASK_SUPPORTED ? " masked" : "")}
+          type={CSS_MASK_SUPPORTED ? "text" : "password"}
           autoComplete="off"
           spellCheck={false}
           placeholder="可选；留空则只使用密码库中的密码"
@@ -1656,10 +1667,13 @@ export default function App() {
             </div>
             <div className="pwadd">
               <input
-                type="password"
+                className={CSS_MASK_SUPPORTED ? "masked" : undefined}
+                type={CSS_MASK_SUPPORTED ? "text" : "password"}
                 autoComplete="off"
                 spellCheck={false}
-                placeholder="添加密码（明文保存，仅存本机）"
+                autoCorrect="off"
+                autoCapitalize="off"
+                placeholder="添加密码（可直接键入中文；明文保存，仅存本机）"
                 value={pwInput}
                 onChange={(event) => setPwInput(event.target.value)}
                 onKeyDown={(event) => {

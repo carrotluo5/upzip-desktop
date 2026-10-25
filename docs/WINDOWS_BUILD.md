@@ -4,7 +4,10 @@
 真实 Windows 上构建。** 0.3.1 起便携包是**单 exe**：GUI 与 CLI 都已内嵌 7-Zip 25.01
 与前端资源，不再附带 sidecar `7z.exe`/`7z.dll`。0.3.2 起补充 Windows 体验修复：
 不自建控制台窗口（`CREATE_NO_WINDOW`）、7-Zip 失败信息含路径/退出码/stderr 尾部、
-Windows 锁文件错误（5/32/225）自动重试、日志落盘与设置页诊断信息。两条路线都
+Windows 锁文件错误（5/32/225）自动重试、日志落盘与设置页诊断信息。0.3.3 为纯 GUI
+修复：解压时主进度条不再被右侧活动路径文本挤得忽长忽短；密码输入框改用
+`-webkit-text-security: disc` 掩码，WebView2 下中文输入法可直接键入（不支持则回退
+`type=password`）。两条路线都
 **没有在真实 Windows 上运行验证过**——这是本项目当前最大的验证缺口，详见 §5「诚实边界」。
 
 ## 1. 路线 A：macOS 交叉编译便携版（本仓库实测可跑通编译）
@@ -99,22 +102,24 @@ Windows 专用 Tauri 配置在 `gui/src-tauri/tauri.windows.conf.json`（NSIS �
 | 7-Zip 报错看不懂 | v0.3.2 起错误信息包含 7z 路径、OS 错误/退出码、stderr 尾部（≤1000 字符），并提示可设 `UNPARANOIA_7Z` 指向已安装 7-Zip；锁文件错误 5/32/225 会自动重试最多 3 次（间隔 150 ms）后再报错 |
 | 第二次拖同一文件没有重新解压 | v0.3.2 起「跳过已处理」**默认关闭**（旧配置一次性迁移）；只有开启后才会按 `processed.json` 跳过。如需重跑：GUI 设置页「清除处理记录」，或 CLI 加 `--skip-processed` 才启用跳过 |
 | GUI 解密时闪过黑色控制台窗口 | v0.3.1 及更早的已知问题；v0.3.2 起 7z 子进程使用 `CREATE_NO_WINDOW`，GUI 不再弹窗（真机待验证） |
+| 解压时主进度条随文件名/输出路径忽长忽短 | v0.3.1 及更早的单行布局中活动文本按内容伸缩；v0.3.3 起进度条独占一行（宽度只随窗口变化）、活动文本另起一行省略（纯前端修复，真机待验证） |
+| 密码管理/追加密码框无法用中文输入法直接键入（只能粘贴） | v0.3.1 及更早使用 `type="password"`，Windows WebView2 下 IME 行为异常；v0.3.3 起在支持 `-webkit-text-security` 的 WebView 上改用 `type="text"` + `disc` 掩码，不支持时自动回退 `type="password"`；真机 WebView2 待验证 |
 
 ## 5. 诚实边界（必须保留）
 
-**已验证**（macOS 主机交叉编译，2026-10-24，
+**已验证**（macOS 主机交叉编译，2026-10-25，
 `./scripts/build-windows-portable.sh` exit 0，仅有 LNK4099 之类 PDB 警告，与产物无关）。
-下表是 **v0.3.2 单 exe 布局的最终记录**；每次重建哈希都会变。
+下表是 **v0.3.3 单 exe 布局的最终记录**；每次重建哈希都会变。
 
 | 产物 | 大小 (B) | SHA-256 |
 |---|---|---|
-| 便携 zip `target/windows-portable/Unparanoia-0.3.2-win-x64-portable.zip` | 7,160,723 | `465490d7311a1aad4328baf825d0807f9d62d6559e54ff13274c1ae457cc2254` |
-| 包内 GUI `Unparanoia.exe`（PE32+ GUI x86-64） | 13,758,464 | `e1c18e51e39aacb186a945ae8efcbbbd7c7008ba9224a32c166feba283fbdf99` |
-| 包内 CLI `unparanoia-cli.exe`（PE32+ console x86-64） | 6,211,584 | `ee54556a1c24a79dadedcd25496174e627aa0f0c2fafd953d3332920551c2fa1` |
+| 便携 zip `target/windows-portable/Unparanoia-0.3.3-win-x64-portable.zip` | 7,161,869 | `d4a857a91dd2c18c1b5a779db7235624dad550626458f0e91a82bbea21c01a04` |
+| 包内 GUI `Unparanoia.exe`（PE32+ GUI x86-64） | 13,758,976 | `d700683abfbf4c984698f755927d4da1cc618bd4c30279bb2307c27447cb7b42` |
+| 包内 CLI `unparanoia-cli.exe`（PE32+ console x86-64） | 6,211,584 | `58d93cf37d277ccc2d8aff53d2da1fbb5d6e9a07f09e1221857bfdf5e73ddb2e` |
 | 包内 `7z-LICENSE.txt` | 6,029 | 与 `binaries/7z-LICENSE.txt` 一致（`99df5a51…`） |
 
 - zip 用 `7zz l` 核对为 **5 个文件 + 1 个目录**，顶层目录
-  `Unparanoia-0.3.2-win-x64-portable/`（两个 exe、`7z-LICENSE.txt`、`README.txt`、
+  `Unparanoia-0.3.3-win-x64-portable/`（两个 exe、`7z-LICENSE.txt`、`README.txt`、
   `SHA256SUMS`；**不再有** `7z.exe`/`7z.dll` 侧车）；解压后
   `shasum -c SHA256SUMS` 全部 OK；
 - **单 exe 生效证据**：GUI exe 内 `tauri://localhost` 标记命中（custom-protocol 已
@@ -125,6 +130,9 @@ Windows 专用 Tauri 配置在 `gui/src-tauri/tauri.windows.conf.json`（NSIS �
 - 7-Zip 二进制为官方 25.01 x64（PE 版本资源 25.01 / 2025-08-03 / Igor Pavlov，
   无 Authenticode 签名），哈希见 binaries/README.md；
 - `unparanoia-cli --licenses` 可输出内嵌/随包 7-Zip 许可证（LGPL 2.1 + unRAR 限制）；
+- v0.3.3 为纯前端修复（真机 WebView2 仍未验证）：主进度条改为两行布局，活动
+  路径文本不再挤动进度条；密码框在支持 `-webkit-text-security` 的 WebView 上改用
+  `type="text"` + disc 掩码以允许中文输入法直接键入（不支持则回退 `type="password"`）；
 - v0.3.2 新增 Windows 修复（静态/单测证据，真机未跑）：7z 子进程
   `CREATE_NO_WINDOW`（不弹控制台）、失败信息含路径/退出码/stderr 尾部、
   spawn 锁文件错误 5/32/225 重试 3 次；日志/诊断见 §4 与 VERIFICATION.md §9。
@@ -147,7 +155,7 @@ Windows 专用 Tauri 配置在 `gui/src-tauri/tauri.windows.conf.json`（NSIS �
 - macOS 侧 DMG 打包在 2026-10-24 曾失败（tauri 只报 `failed to run bundle_dmg.sh`）：
   根因是 `target/release/bundle/macos/` 残留了被中断构建留下的半成品同名 dmg 与
   `rw.*.dmg`，`hdiutil convert` 遇目标已存在而失败；清理后重跑成功（v0.3.0/v0.3.1/
-  v0.3.2 最终构建均如此，见 BUILD.md §7 与 VERIFICATION.md §7）。与 Windows 交叉编译无关。
+  v0.3.2/v0.3.3 最终构建均如此，见 BUILD.md §7 与 VERIFICATION.md §7）。与 Windows 交叉编译无关。
 
 首次正式发布前，必须在一台真实 Windows 11 x64 上执行：
 `unparanoia-cli.exe doctor`、真实样本解密（含分卷 `.enc` 组）、GUI 拖放、

@@ -150,7 +150,7 @@ CLI 的 `config --path` / `doctor` 会打印实际路径。旧目录 `paranoia-e
 
 依赖与产物细节见 [docs/BUILD.md](docs/BUILD.md) 和
 [docs/WINDOWS_BUILD.md](docs/WINDOWS_BUILD.md)。注意本仓库是单一 Cargo workspace，
-产物在**仓库根** `target/release/`。v0.3.2 最终构建的产物体积/SHA-256 见
+产物在**仓库根** `target/release/`。v0.3.3 最终构建的产物体积/SHA-256 见
 [docs/VERIFICATION.md](docs/VERIFICATION.md) §7（每次重建会变）。
 
 ## 验证（诚实版）
@@ -167,6 +167,11 @@ CLI 的 `config --path` / `doctor` 会打印实际路径。旧目录 `paranoia-e
 - v0.3.2 跳过行为回归（Lead 手工，release CLI）：两个 `.enc` 合并 2.2 s 成功、默认
   第二次运行仍成功（不跳过）、显式 `--skip-processed` 第二次 skipped 2 并生成
   `processed.json`；GUI 启动后日志实际落盘。详见 VERIFICATION.md §7/§8。
+- v0.3.3 两处 GUI 修复的量化验证（Swift + WKWebView 最小页面，本机）：旧单行布局下活动
+  文本长短使主进度条宽度 1022 → 714.73 px（被挤短 307.27 px），新两行布局下恒为
+  1080 px；`-webkit-text-security: disc` 在 WKWebView 计算值为 `disc`、`CSS.supports`
+  为 true 且密码渲染为圆点；`pnpm --dir gui build` exit 0。Windows 真机（WebView2 +
+  中文输入法）行为仍待用户验证，见 VERIFICATION.md §10。
 - 真实样本 `3138.7z.001.enc`/`.002.enc`（密码 123）曾在 2026-10-23 通过**独立 Java
   Oracle** 全链路验证（MAC/checkcode/ZIP CRC/明文 SHA-256/`cmp` 全部一致）。
   但该验证**当前不可重跑**（Oracle 前置与原始明文文件已不在本机），仓库里只有
@@ -199,7 +204,7 @@ docs/                   FORMAT / CORE_API / OUTPUT-LAYOUT / BUILD / WINDOWS_BUIL
 - [docs/BUILD.md](docs/BUILD.md) / [docs/WINDOWS_BUILD.md](docs/WINDOWS_BUILD.md) — 构建
 - [docs/VERIFICATION.md](docs/VERIFICATION.md) — 验证证据与未验证清单
 - [docs/oracle-report.md](docs/oracle-report.md) — 真实样本 Oracle 验证历史记录
-- [docs/MERGE-MAPPING.md](docs/MERGE-MAPPING.md) — 与两个前身的功能映射及 v0.3.0/v0.3.1/v0.3.2 增量
+- [docs/MERGE-MAPPING.md](docs/MERGE-MAPPING.md) — 与两个前身的功能映射及 v0.3.0–v0.3.3 增量
 - [docs/DEV-CONTRACT.md](docs/DEV-CONTRACT.md) — v0.3.0 内部接口契约（开发用）
 
 ## 版本与行为差异（有意）
@@ -211,6 +216,7 @@ docs/                   FORMAT / CORE_API / OUTPUT-LAYOUT / BUILD / WINDOWS_BUIL
 | v0.3.0 | 更名 **Unparanoia（帕罗诺亚解包器）**；密码库（多密码明文）+ 密码管理页；逐层多密码重试；明暗主题；新图标；配置/env/事件更名（旧名兼容读取） |
 | v0.3.1 | 分段压缩包（普通卷 + `.enc` 分卷）；Windows 改为**单 exe**（内嵌 7-Zip 与前端）；修复 Windows GUI 白屏（`--features custom-protocol`）；`--licenses`/GUI 许可证查看；版本号 0.3.1 |
 | v0.3.2 | 跳过已处理**默认关闭**（旧配置一次性迁移，CLI `--skip-processed` opt-in）；分卷在队列中行归并（`TaskOutcome.related_paths`）/全跳过提示条；Windows 无控制台闪窗 + 7z 错误细节 + 锁文件重试；日志落盘/设置页诊断（复制/打开日志/清除处理记录）；版本号 0.3.2 |
+| v0.3.3 | GUI 修复：主进度条不再被右侧活动文本（当前文件/输出路径）挤得忽长忽短——进度条独占一行、活动文本另起一行截断；密码输入框改用 `-webkit-text-security: disc` 掩码并回退 `type=password`，支持用输入法直接键入中文密码；版本号 0.3.3 |
 
 升级注意：
 
@@ -223,6 +229,12 @@ docs/                   FORMAT / CORE_API / OUTPUT-LAYOUT / BUILD / WINDOWS_BUIL
 | 嵌套密码 | 每层单独试单个密码，失败即放弃 | 每层重走完整候选池，全部失败才报需要密码 |
 | 冲突重命名 | `hello (1).txt` | 不变 |
 | 范围 | 解密 `.enc` + 批量解压 | 不变（+ 密码库/主题/分卷） |
+
+v0.3.3 变更：仅 GUI 前端（`gui/src/App.tsx`、`gui/src/App.css`），Rust/CLI/引擎无改动。
+主进度条改为独占一行（宽度只随窗口变化），活动文本另起一行省略，不再出现进度条随
+文件名/路径长短伸缩；密码输入框在支持的 WebView（WKWebView / WebView2）上使用
+`type="text"` + `-webkit-text-security: disc` 掩码，使中文输入法可直接键入（不再只能
+粘贴），不支持时自动回退 `type="password"`。密码仍为明文保存（仅存本机）。
 
 v0.3.2 变更：**跳过已处理默认关闭**（旧 `settings.json` 一次性迁移为关闭），
 默认重复运行会重新解压；要跳过需 `--skip-processed` 或 GUI 设置开启。Windows GUI
@@ -239,7 +251,7 @@ v0.3.2 变更：**跳过已处理默认关闭**（旧 `settings.json` 一次性�
 - 加密头部的归档在无口令时无法枚举内容（只能报告"需要密码"）。
 - 7-Zip 25.01 对"前缀 ZIP"的拒绝已用切片兜底，但其它版本的 7-Zip 行为可能不同。
 - 带口令的安装器（InstallShield/Inno/NSIS）内嵌文件不在支持范围。
-- 未在真实 Windows 上运行验证；Windows 便携版仅交叉编译产出（静态证据见 VERIFICATION.md §9；v0.3.2 的 `CREATE_NO_WINDOW`/重试/错误细节也只有单测与静态证据）。
+- 未在真实 Windows 上运行验证；Windows 便携版仅交叉编译产出（静态证据见 VERIFICATION.md §9；v0.3.2 的 `CREATE_NO_WINDOW`/重试/错误细节也只有单测与静态证据）。v0.3.3 的进度条布局与密码框输入法修复虽用 WKWebView 量化验证，但 Windows WebView2 真机行为（尤其中文输入法）仍待用户复验。
 - 分段压缩包必须从第一卷开始（`.001` / `.part1.rar`）；缺后续卷会明确报错，不会输出半成品。
 - Windows 单 exe 首次运行需写入用户缓存目录（`%LOCALAPPDATA%\Unparanoia\`）。
 - 密码库是明文存储（0600 仅 Unix 生效），不是加密保险箱。

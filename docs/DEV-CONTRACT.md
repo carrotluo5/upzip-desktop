@@ -548,3 +548,56 @@ gui-frontend：仅在收到 Lead 通知后改 gui/src/**（许可证查看入口
   `./scripts/build-windows-portable.sh`；真实样本手动复验（两卷一起 / 只给 .001 / 只给 .002）；
   GUI 冒烟与截图；回填文档哈希；中文 git commit；桌面 `~/Desktop/Unparanoia-0.3.2/`。
 - 最终回复向用户索取 Windows 端日志（日志页 → 打开日志目录 → `unparanoia.log`）以定位 Windows 解压失败。
+
+---
+
+## 10. v0.3.3 增补：纯 GUI 修复（主进度条布局 / 密码框输入法）
+
+### 10.0 背景
+
+- 用户反馈（Windows 11 实测）：解压时主进度条右侧的「活动文本」（当前文件/阶段/输出路径）
+  会随路径长短变化，把主进度条挤得忽长忽短。根因：`gui/src/App.css` 的 `.batchprog` 是
+  单行 flex，活动文本无固定 `flex-basis`，按内容宽度伸缩；`.progress.big` 为 `flex:1`，
+  因此进度条宽度 = 容器宽 − 文本宽。
+- 用户反馈：密码管理页/队列「本次追加密码」框只能粘贴中文，输入法无法直接键入。根因推断：
+  Windows WebView2 对 `<input type="password">` 的 IME 支持异常。
+- 未验证 macOS 是否有同样现象（两种内核下 CSS/IME 行为不同，但修复与平台无关）。
+
+### 10.1 前端（作用域 `gui/src/App.tsx`、`gui/src/App.css`，v0.3.3 唯一改动面）
+
+1. 主进度条布局：`.batchprog` 改为 `display:flex; flex-direction:column; align-items:stretch;
+   gap:4px`；`.progress.big` 为 `height:22px; flex:none; width:100%`；`.activity` 去掉
+   `flex`/`flex-basis`，改为 `font-size:11.5px; white-space:nowrap; overflow:hidden;
+   text-overflow:ellipsis; max-width:100%`；`@media (max-width:980px)` 中同样 `max-width:100%`。
+   JSX 不变（activity 仍在 bar 之后，仅垂直排列）。
+2. 密码框：新增常量
+   `CSS_MASK_SUPPORTED = (() => { try { return typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("-webkit-text-security","disc"); } catch { return false; } })();`
+   - 队列页输入框：`className={"pwinput" + (CSS_MASK_SUPPORTED ? " masked" : "")}`、
+     `type={CSS_MASK_SUPPORTED ? "text" : "password"}`；
+   - 密码管理页输入框：`className={CSS_MASK_SUPPORTED ? "masked" : undefined}`、
+     `type={CSS_MASK_SUPPORTED ? "text" : "password"}`，加 `autoCorrect="off"`、
+     `autoCapitalize="off"`，placeholder「添加密码（可直接键入中文；明文保存，仅存本机）」；
+   - `App.css` 新增 `.masked { -webkit-text-security: disc; }`。
+   - 不支持掩码的 WebView 必须回退 `type="password"`（不得明文显示密码）。
+3. 不新增运行时依赖；不使用 `any`/`innerHTML`；不改后端命令/事件/引擎/CLI。
+
+### 10.2 验证
+
+- `cd gui && pnpm build` exit 0（tsc + vite，24 modules，CSS 13.39 kB / JS 283.31 kB）。
+- Swift + WKWebView 最小页面（/tmp 临时 harness）量化：
+  - 旧单行布局进度条宽度随 activity 文本 1022 → 714.73 px；新两行布局恒 1080 px；
+  - `CSS.supports("-webkit-text-security","disc")` = true，`getComputedStyle` 为 `disc`，
+    ASCII/中文密码均渲染圆点；
+  - 细节见 `docs/VERIFICATION.md` §5a。
+- 诚实边界：**未在真实 Windows 11（WebView2 + 中文输入法）上验证**，真机结果由用户复验；
+  不把 WKWebView 结果当作 WebView2 证据。
+
+### 10.3 Lead
+
+- 版本 0.3.3：根 `Cargo.toml`、`gui/package.json`、`gui/src-tauri/tauri.conf.json`；
+  `scripts/e2e-verify.sh` 的 `--version` 断言同步更新。
+- 依次：`cargo test --workspace`、`cargo check --workspace --all-targets`、
+  `./scripts/e2e-verify.sh`、`pnpm --dir gui build`、`./scripts/build.sh`、
+  `./scripts/build-windows-portable.sh`；回填 docs 哈希与 README 版本历史；中文 git commit；
+  桌面 `~/Desktop/Unparanoia-0.3.3/`。
+

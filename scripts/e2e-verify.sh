@@ -78,7 +78,7 @@ echo
 echo "== 1. 基础命令"
 run_cli --version
 check "--version" 0 "${RC}"
-if [[ "${OUT}" == *"0.3.2"* ]]; then pass "--version 含 0.3.2"; else fail "--version 不含 0.3.2: ${OUT}"; fi
+if [[ "${OUT}" == *"0.3.3"* ]]; then pass "--version 含 0.3.3"; else fail "--version 不含 0.3.3: ${OUT}"; fi
 
 RESET_CONFIG
 run_cli doctor

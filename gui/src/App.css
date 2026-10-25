@@ -283,6 +283,13 @@ select:focus-visible {
   letter-spacing: 0.5px;
 }
 
+/* 密码输入框掩码：Windows WebView2 的 type="password" 不接受中文输入法直接键入，
+   因此改用 type="text" + -webkit-text-security 掩码（WebKit/Chromium 均支持）。
+   不支持该属性的引擎会回退到 type="password"（见 App.tsx 的 CSS_MASK_SUPPORTED）。 */
+.masked {
+  -webkit-text-security: disc;
+}
+
 .check {
   display: inline-flex;
   align-items: center;
@@ -486,19 +493,22 @@ select:focus-visible {
 
 .batchprog {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
   padding: 7px 10px;
   border-bottom: 1px solid var(--line);
   flex: 0 0 auto;
 }
 
+/* 主进度条独占一行，宽度只随窗口变化；活动文本（当前文件/输出路径等）另起一行
+   并在行内省略，避免文本长短把主进度条挤得忽长忽短。 */
 .activity {
-  font-size: 12px;
+  font-size: 11.5px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 42%;
+  max-width: 100%;
 }
 
 .progress {
@@ -532,7 +542,8 @@ select:focus-visible {
 
 .progress.big {
   height: 22px;
-  flex: 1;
+  flex: none;
+  width: 100%;
 }
 
 .progress.big .pct {
@@ -1107,7 +1118,7 @@ td.empty {
   }
 
   .activity {
-    max-width: 30%;
+    max-width: 100%;
   }
 
   .grid2 {
