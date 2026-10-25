@@ -13,6 +13,9 @@
 //!   cleanup-staging [--root DIR]...     remove .unparanoia-tmp-* leftovers
 //!   --licenses                          print the embedded 7-Zip license text
 //!
+//! Processed-fingerprint skipping is opt-in: pass `--skip-processed` to skip files
+//! already recorded in processed.json; without it every run reprocesses everything.
+//!
 //! Exit codes: 0 all succeeded/skipped, 1 any failed or needs-password,
 //! 2 usage/config/environment error, 130 cancelled with Ctrl-C.
 
@@ -109,8 +112,11 @@ fn print_help() {
     println!("run 常用选项：-j/--jobs、-o/--output-dir、-p/--password（可重复）、");
     println!("  --conflict rename|skip|overwrite、--layout smart|folder|direct、");
     println!("  --no-recursive、--no-nested、--max-depth N、--keep-broken、--dry-run、");
-    println!("  --force-documents、--allow-execute-sfx、--stop-on-error、--no-skip-processed、");
+    println!("  --force-documents、--allow-execute-sfx、--stop-on-error、--skip-processed、");
     println!("  --no-strip-junk、--try-empty-password、--json、--sevenzip PATH");
+    println!();
+    println!("跳过已处理：默认不跳过（每次都会重新处理）；仅当显式 --skip-processed 时");
+    println!("            才按 processed.json 指纹跳过已成功处理过的文件。");
     println!();
     println!("退出码：0 成功/跳过；1 有失败或缺少密码；2 用法/配置/环境错误；130 已取消");
     println!("环境变量：UNPARANOIA_PASSWORD（密码；兼容 PARANOIA_ENC_PASSWORD）、");
@@ -208,8 +214,12 @@ struct RunFlags {
     #[arg(long = "stop-on-error")]
     stop_on_error: bool,
 
-    /// Ignore the processed-fingerprint store (re-extract everything)
-    #[arg(long = "no-skip-processed")]
+    /// Skip files recorded in processed.json (opt-in; default: process everything)
+    #[arg(long = "skip-processed")]
+    skip_processed: bool,
+
+    /// Deprecated no-op: processed-fingerprint skipping is off by default now
+    #[arg(long = "no-skip-processed", hide = true)]
     no_skip_processed: bool,
 
     /// Keep __MACOSX / .DS_Store / ._* entries
@@ -254,8 +264,9 @@ fn apply_run_flags(cfg: &mut RunConfig, flags: &RunFlags) -> Result<(), String> 
     if flags.no_nested {
         cfg.nested = false;
     }
-    if flags.no_skip_processed {
-        cfg.skip_processed = false;
+    // Skipping processed files is opt-in: the engine default is "process everything".
+    if flags.skip_processed {
+        cfg.skip_processed = true;
     }
     if flags.no_strip_junk {
         cfg.strip_junk = false;
@@ -1087,7 +1098,9 @@ async fn cmd_run(args: &[String]) -> i32 {
     install_ctrlc(cancel.clone());
     let gate = Arc::new(PauseGate::new());
     let summary: Summary = run_batch(engine.clone(), files, cancel, gate, sink).await;
-    if !cfg.dry_run {
+    // Only persist fingerprints when skipping is enabled; otherwise the store is
+    // not consulted and writing it would just leak debug/incidental paths.
+    if !cfg.dry_run && cfg.skip_processed {
         let _ = engine.save_processed().await;
     }
 
@@ -1680,14 +1693,16 @@ async fn cmd_doctor(args: &[String]) -> i32 {
         None => println!("settings.json：配置目录不可用"),
     }
     let processed = ProcessedStore::default_path();
+    let processed_count = ProcessedStore::load(processed.clone()).count();
     println!(
-        "processed.json：{}（{}）",
+        "processed.json：{}（{}，{} 条记录）",
         processed.display(),
         if processed.exists() {
             "存在"
         } else {
             "不存在"
-        }
+        },
+        processed_count
     );
 
     let sevenzip = match resolve_sevenzip(cli.sevenzip.clone()) {

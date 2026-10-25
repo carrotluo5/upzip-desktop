@@ -297,8 +297,21 @@ pub fn pe_info(path: &Path) -> Result<Option<PeInfo>> {
 
 /// UI labels that look like passwords but are not.
 const HINT_BLACKLIST: &[&str] = &[
-    "password", "passwd", "pwd", "invalid", "error", "incorrect", "密码", "密码错误",
-    "无效的密码", "输入密码", "显示密码", "确认密码", "解压密码", "错误", "失败",
+    "password",
+    "passwd",
+    "pwd",
+    "invalid",
+    "error",
+    "incorrect",
+    "密码",
+    "密码错误",
+    "无效的密码",
+    "输入密码",
+    "显示密码",
+    "确认密码",
+    "解压密码",
+    "错误",
+    "失败",
 ];
 
 /// Password-ish hints found in a ZIP comment or companion text.
@@ -312,13 +325,21 @@ pub fn hints_from_text(text: &str) -> Vec<String> {
     for cap in re.captures_iter(text) {
         if let Some(m) = cap.get(1) {
             let v = m.as_str().trim_matches(|c: char| {
-                c.is_whitespace() || c == '.' || c == ',' || c == ':' || c == '：' || c == '"' || c == '\''
+                c.is_whitespace()
+                    || c == '.'
+                    || c == ','
+                    || c == ':'
+                    || c == '：'
+                    || c == '"'
+                    || c == '\''
             });
             if v.is_empty() || v.len() > 64 {
                 continue;
             }
             let low = v.to_lowercase();
-            if low.starts_with("http") || low.contains("://") || HINT_BLACKLIST.contains(&low.as_str())
+            if low.starts_with("http")
+                || low.contains("://")
+                || HINT_BLACKLIST.contains(&low.as_str())
             {
                 continue;
             }
@@ -1042,9 +1063,11 @@ mod tests {
         // Wrong algorithm.
         let mut bad_alg = ssefe_header(0x00);
         bad_alg[6] = 1;
-        assert!(
-            ssefe_detection(&bad_alg, bad_alg.len() as u64, std::path::Path::new("x.enc"))
-                .is_none()
-        );
+        assert!(ssefe_detection(
+            &bad_alg,
+            bad_alg.len() as u64,
+            std::path::Path::new("x.enc")
+        )
+        .is_none());
     }
 }

@@ -11,6 +11,8 @@ v0.2.0 合并为一个产品，v0.3.0 起统一更名为 **Unparanoia（帕罗�
 - **分段压缩包**（`.7z.001` / `.zip.001` / `.part1.rar`，含 `.enc` 分卷自动聚合）
 - **Windows 单 exe**：GUI/CLI 内嵌 7-Zip 25.01 与前端，不再附带 sidecar
 - 明暗主题（跟随系统 / 浅色 / 深色）、`--licenses` 查看 7-Zip 许可证
+- 日志落盘 `<configDir>/logs/unparanoia.log`（2 MiB 轮转）+ 设置页「诊断信息」
+  （复制诊断 JSON / 打开日志目录 / 清除处理记录）
 - 不联网；口令只在本机存储（明文 JSON，权限 0600），详见「安全模型」
 
 ## 功能
@@ -24,15 +26,15 @@ v0.2.0 合并为一个产品，v0.3.0 起统一更名为 **Unparanoia（帕罗�
 | 前缀 ZIP（7-Zip 25.01 已知拒绝） | 自动切片/偏移兜底，例如 MP4 头 + ZIP 载荷 |
 | 嵌套级联 | 内层压缩包递归展开，默认深度 4（上限 8），深度耗尽时保留最内层归档 |
 | 逐层多密码重试 | 每层都按完整候选池重试（外层和内层密码不同也能命中）；全部失败才报"需要密码" |
-| 分段压缩包 | `.7z.001`/`.zip.001`/`.part1.rar` 同族卷自动聚合为一个任务；只给非首卷会明确提示补第一卷；`.enc` 分卷逐卷解密后再按 7-Zip 分卷解 |
-| Windows 单 exe | 0.3.1 起 GUI/CLI 内嵌 7-Zip 25.01 与前端资源，首次运行解压到 `%LOCALAPPDATA%\Unparanoia\embedded-7z\25.01-r1\`（可用 `UNPARANOIA_7Z_CACHE_DIR` 覆盖） |
+| 分段压缩包 | `.7z.001`/`.zip.001`/`.part1.rar` 同族卷自动聚合为一个任务（GUI 队列中同族卷行归并为一行）；只给非首卷会明确提示补第一卷；`.enc` 分卷逐卷解密后再按 7-Zip 分卷解 |
+| Windows 单 exe | 0.3.1 起 GUI/CLI 内嵌 7-Zip 25.01 与前端资源，首次运行解压到 `%LOCALAPPDATA%\Unparanoia\embedded-7z\25.01-r1\`（可用 `UNPARANOIA_7Z_CACHE_DIR` 覆盖）；v0.3.2 起 7z 子进程不弹控制台窗口 |
 | 许可证查看 | `unparanoia-cli --licenses`、GUI 设置页「7-Zip 许可证」 |
 | 密码库（密码管理页） | 多密码明文保存在本机 `config.json`（0600），GUI「密码」页增删/清空、可切换显示掩码 |
 | 明暗主题 | 设置页可选 跟随系统 / 浅色 / 深色，跟随系统时监听系统配色并实时切换 |
 | 智能输出布局 | 单条目直接摊开、多条目自动建文件夹（smart/folder/direct） |
 | 冲突处理 | rename（默认，`hello (1).txt`，沿用旧 paranoia 风格；upzip 基线是 `hello_1.txt`）/ skip / overwrite；目录只合并不清空 |
 | 垃圾条目清洗 | 默认删除 `__MACOSX`、`._*`、`.DS_Store`、`Thumbs.db` 等 |
-| 断点式重跑 | processed.json 记录已成功输入，默认跳过重跑（可关） |
+| 断点式重跑 | `processed.json` 记录已成功输入；**v0.3.2 起默认关闭**，仅 `--skip-processed` / GUI 设置开启时按指纹跳过重跑（旧配置一次性迁移为关闭） |
 | 口令候选 | CLI `-p` → 环境变量 `UNPARANOIA_PASSWORD` → 密码库全部 → 压缩包注释提示 → 空密码（可选）；每个候选都会逐层尝试 |
 | 记录/清理 | `cleanup-staging` 清理临时残留；GUI 设置页有同名按钮 |
 
@@ -52,6 +54,10 @@ pnpm --dir gui tauri dev      # 开发模式
 密码库在「密码」页管理；外观主题在「设置」页切换。处理事件通过
 `unparanoia://event` 推送，结束后 `unparanoia://done` 汇总。
 
+排查问题时：日志在 `<configDir>/logs/unparanoia.log`（启动、7-Zip 定位、任务关键行、
+错误与 panic 都会写；>2 MiB 轮转）；设置页「诊断信息」可复制版本/路径/7-Zip 来源/
+配置摘要。v0.3.2 起 GUI 不再弹黑色控制台窗口（7z 子进程 `CREATE_NO_WINDOW`）。
+
 ## 快速开始（CLI）
 
 ```bash
@@ -65,6 +71,7 @@ $CLI run 文件.enc -p 口令 -o 输出目录           # 解密 + 解内层
 $CLI run 一批文件... -p 口令 --jobs 4 --layout smart --conflict rename --json
 $CLI run 3138.7z.001.enc 3138.7z.002.enc -p 口令 -p 内层口令   # .enc 分卷组自动聚合
 $CLI run 包.7z.001 -p 口令                    # 普通分卷：同目录其余卷由 7-Zip 自动读取
+$CLI run 文件.enc -p 口令 --skip-processed    # 显式启用「跳过已处理」（默认不跳过）
 $CLI --licenses                               # 查看内嵌/随包 7-Zip 许可证
 
 # 密码库（config.json 中的多密码，明文保存）
@@ -80,7 +87,8 @@ $CLI cleanup-staging --root ~/Downloads      # 清理 .unparanoia-tmp-* 残留
 常用选项：`-p/--password`（可重复）、`-o/--output-dir`、`-j/--jobs`、
 `--conflict rename|skip|overwrite`、`--layout smart|folder|direct`、
 `--no-recursive`、`--no-nested`、`--max-depth 1-8`、`--keep-broken`、`--dry-run`、
-`--force-documents`、`--stop-on-error`、`--no-skip-processed`、`--no-strip-junk`、
+`--force-documents`、`--stop-on-error`、`--skip-processed`（默认不跳过；旧
+`--no-skip-processed` 仍接受但为兼容 no-op）、`--no-strip-junk`、
 `--try-empty-password`、`--json`、`--sevenzip PATH`。
 
 退出码：`0` 成功/跳过，`1` 有失败或需要密码，`2` 用法/配置/环境错误，`130` 被 Ctrl-C 取消。
@@ -115,8 +123,9 @@ $CLI cleanup-staging --root ~/Downloads      # 清理 .unparanoia-tmp-* 残留
 | 文件 | 内容 | macOS | Windows |
 |---|---|---|---|
 | `config.json` | 密码库（多密码，明文，0600） | `~/Library/Application Support/unparanoia/` | `%APPDATA%\unparanoia\` |
-| `settings.json` | 设置（含 `theme`） | 同上 | 同上 |
-| `processed.json` | 处理记录（断点跳过） | 同上 | 同上 |
+| `settings.json` | 设置（含 `theme`、跳过已处理开关；v0.3.2 起含 `settingsVersion`） | 同上 | 同上 |
+| `processed.json` | 处理记录（断点跳过）；**默认不生成**，仅开启跳过并成功后写入 | 同上 | 同上 |
+| `logs/unparanoia.log` | GUI/CLI 日志（>2 MiB 轮转为 `.1`） | 同上 | 同上 |
 
 CLI 的 `config --path` / `doctor` 会打印实际路径。旧目录 `paranoia-enc-decryptor/`
 仅作为迁移/回退读取来源，新写入一律进入 `unparanoia/`。
@@ -141,25 +150,30 @@ CLI 的 `config --path` / `doctor` 会打印实际路径。旧目录 `paranoia-e
 
 依赖与产物细节见 [docs/BUILD.md](docs/BUILD.md) 和
 [docs/WINDOWS_BUILD.md](docs/WINDOWS_BUILD.md)。注意本仓库是单一 Cargo workspace，
-产物在**仓库根** `target/release/`。v0.3.1 最终构建的产物体积/SHA-256 见
+产物在**仓库根** `target/release/`。v0.3.2 最终构建的产物体积/SHA-256 见
 [docs/VERIFICATION.md](docs/VERIFICATION.md) §7（每次重建会变）。
 
 ## 验证（诚实版）
 
-- `cargo test --workspace`：**107 通过 / 0 失败 / 2 ignored**（core 43 + oracle 向量 1 +
-  embedded-7z 3 + unpack-core 60；2 个 ignored 的测试需要真实样本）。
-- `./scripts/e2e-verify.sh`：**91 项 CLI e2e 全部通过**（合成 fixture，覆盖 SSEFE、
+- `cargo test --workspace`：**114 通过 / 0 失败 / 2 ignored**（core 43 + oracle 向量 1 +
+  embedded-7z 3 + unpack-core 65 + GUI lib 2；2 个 ignored 的测试需要真实样本）。
+- `./scripts/e2e-verify.sh`：**104 项 CLI e2e 全部通过**（合成 fixture，覆盖 SSEFE、
   加密 7z、前缀 ZIP、级联、逐层多密码、密码库、冲突、JSON、错误口令、清理、
-  普通分卷 / `.enc` 分卷 / 缺卷 / 只给非首卷等）。
+  普通分卷 / `.enc` 分卷 / 缺卷 / 只给非首卷，以及 v0.3.2 的「跳过默认关闭 /
+  `--skip-processed` / `related_paths` 卷归并」）。
 - 分段压缩包另在真实样本 `3138.7z.001.enc`+`.002.enc`（Paranoia 口令 123、内层 7z
   口令 anzixin）上由 Lead 手工复验：合并 1 个任务、输出 `3138/`（5 文件，352.85 MiB），
   只给首卷自动发现、只给非首卷跳过、缺卷失败，详见 VERIFICATION.md §8。
+- v0.3.2 跳过行为回归（Lead 手工，release CLI）：两个 `.enc` 合并 2.2 s 成功、默认
+  第二次运行仍成功（不跳过）、显式 `--skip-processed` 第二次 skipped 2 并生成
+  `processed.json`；GUI 启动后日志实际落盘。详见 VERIFICATION.md §7/§8。
 - 真实样本 `3138.7z.001.enc`/`.002.enc`（密码 123）曾在 2026-10-23 通过**独立 Java
   Oracle** 全链路验证（MAC/checkcode/ZIP CRC/明文 SHA-256/`cmp` 全部一致）。
   但该验证**当前不可重跑**（Oracle 前置与原始明文文件已不在本机），仓库里只有
   可离线回放的 `verification/oracle/test-vectors.json`。
-- **未验证**：真实 Windows 运行、GUI 手工交互（密码页/主题切换）、DMG 签名/公证、CI 实跑。
-  逐项清单见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。
+- **未验证**：真实 Windows 运行（含无控制台窗口、单 exe 首次解压缓存）、GUI 手工交互
+  （密码页/主题切换/诊断按钮）、DMG 签名/公证、CI 实跑。逐项清单见
+  [docs/VERIFICATION.md](docs/VERIFICATION.md) §10。
 
 ## 目录结构
 
@@ -185,7 +199,7 @@ docs/                   FORMAT / CORE_API / OUTPUT-LAYOUT / BUILD / WINDOWS_BUIL
 - [docs/BUILD.md](docs/BUILD.md) / [docs/WINDOWS_BUILD.md](docs/WINDOWS_BUILD.md) — 构建
 - [docs/VERIFICATION.md](docs/VERIFICATION.md) — 验证证据与未验证清单
 - [docs/oracle-report.md](docs/oracle-report.md) — 真实样本 Oracle 验证历史记录
-- [docs/MERGE-MAPPING.md](docs/MERGE-MAPPING.md) — 与两个前身的功能映射及 v0.3.0/v0.3.1 增量
+- [docs/MERGE-MAPPING.md](docs/MERGE-MAPPING.md) — 与两个前身的功能映射及 v0.3.0/v0.3.1/v0.3.2 增量
 - [docs/DEV-CONTRACT.md](docs/DEV-CONTRACT.md) — v0.3.0 内部接口契约（开发用）
 
 ## 版本与行为差异（有意）
@@ -196,6 +210,7 @@ docs/                   FORMAT / CORE_API / OUTPUT-LAYOUT / BUILD / WINDOWS_BUIL
 | v0.2.0 | 合并 unparanoia + upzip：批量解压、伪装压缩包、级联、并行、settings/processed；单密码明文记忆 |
 | v0.3.0 | 更名 **Unparanoia（帕罗诺亚解包器）**；密码库（多密码明文）+ 密码管理页；逐层多密码重试；明暗主题；新图标；配置/env/事件更名（旧名兼容读取） |
 | v0.3.1 | 分段压缩包（普通卷 + `.enc` 分卷）；Windows 改为**单 exe**（内嵌 7-Zip 与前端）；修复 Windows GUI 白屏（`--features custom-protocol`）；`--licenses`/GUI 许可证查看；版本号 0.3.1 |
+| v0.3.2 | 跳过已处理**默认关闭**（旧配置一次性迁移，CLI `--skip-processed` opt-in）；分卷在队列中行归并（`TaskOutcome.related_paths`）/全跳过提示条；Windows 无控制台闪窗 + 7z 错误细节 + 锁文件重试；日志落盘/设置页诊断（复制/打开日志/清除处理记录）；版本号 0.3.2 |
 
 升级注意：
 
@@ -209,6 +224,10 @@ docs/                   FORMAT / CORE_API / OUTPUT-LAYOUT / BUILD / WINDOWS_BUIL
 | 冲突重命名 | `hello (1).txt` | 不变 |
 | 范围 | 解密 `.enc` + 批量解压 | 不变（+ 密码库/主题/分卷） |
 
+v0.3.2 变更：**跳过已处理默认关闭**（旧 `settings.json` 一次性迁移为关闭），
+默认重复运行会重新解压；要跳过需 `--skip-processed` 或 GUI 设置开启。Windows GUI
+不再弹控制台窗口，日志/诊断入口见「安全模型」与「配置与数据位置」。
+
 ## 许可证
 
 本项目代码：MIT，见 [LICENSE](LICENSE)。随附 7-Zip 25.01：LGPL v2.1+（含 unRAR 限制），
@@ -220,7 +239,7 @@ docs/                   FORMAT / CORE_API / OUTPUT-LAYOUT / BUILD / WINDOWS_BUIL
 - 加密头部的归档在无口令时无法枚举内容（只能报告"需要密码"）。
 - 7-Zip 25.01 对"前缀 ZIP"的拒绝已用切片兜底，但其它版本的 7-Zip 行为可能不同。
 - 带口令的安装器（InstallShield/Inno/NSIS）内嵌文件不在支持范围。
-- 未在真实 Windows 上运行验证；Windows 便携版仅交叉编译产出（静态证据见 VERIFICATION.md §9）。
+- 未在真实 Windows 上运行验证；Windows 便携版仅交叉编译产出（静态证据见 VERIFICATION.md §9；v0.3.2 的 `CREATE_NO_WINDOW`/重试/错误细节也只有单测与静态证据）。
 - 分段压缩包必须从第一卷开始（`.001` / `.part1.rar`）；缺后续卷会明确报错，不会输出半成品。
 - Windows 单 exe 首次运行需写入用户缓存目录（`%LOCALAPPDATA%\Unparanoia\`）。
 - 密码库是明文存储（0600 仅 Unix 生效），不是加密保险箱。

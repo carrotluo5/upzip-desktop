@@ -212,7 +212,12 @@ impl Engine {
         // families, but a single dropped later volume must still give an
         // actionable reason — and work when the first volume exists on disk.
         let split_family = split::discover(path);
+        // Report the whole volume family on the outcome so the GUI can settle
+        // the status rows of the sibling volumes too (only the first volume
+        // becomes a task). Must be set before any bail below, including the
+        // `missing_first` skip, so skipped/failed/success all carry it.
         if let Some(family) = &split_family {
+            out.related_paths = family.volumes.iter().map(|v| v.path.clone()).collect();
             if family.missing_first() {
                 bail!(
                     TaskStatus::Skipped,
@@ -233,7 +238,10 @@ impl Engine {
         if cfg.skip_processed && !fp.is_empty() {
             let store = self.processed_lock();
             if store.contains(&fp) {
-                bail!(TaskStatus::Skipped, "已处理过（processed.json），跳过");
+                bail!(
+                    TaskStatus::Skipped,
+                    "已处理过（历史记录跳过）：如需重新解压请点「重新解压」或在设置中关闭「跳过已处理」"
+                );
             }
         }
 
@@ -483,8 +491,11 @@ impl Engine {
                 if let Some(family) = &encrypted_family {
                     // Decrypt every volume into one folder; 7-Zip then reads the
                     // plain first volume and locates its siblings by name.
-                    let volumes_dir = plain_parent
-                        .join(format!("{}{}", crate::TMP_PREFIX, Uuid::new_v4().simple()));
+                    let volumes_dir = plain_parent.join(format!(
+                        "{}{}",
+                        crate::TMP_PREFIX,
+                        Uuid::new_v4().simple()
+                    ));
                     if let Err(e) = fs::create_dir_all(&volumes_dir) {
                         bail!(
                             TaskStatus::Failed,
@@ -704,9 +715,9 @@ impl Engine {
                         );
                     }
                 }
-                let dir = plan
-                    .parent
-                    .join(format!("{}{}", crate::TMP_PREFIX, Uuid::new_v4().simple()));
+                let dir =
+                    plan.parent
+                        .join(format!("{}{}", crate::TMP_PREFIX, Uuid::new_v4().simple()));
                 staging_guard.set(dir.clone());
 
                 let pool = password_candidates(cfg, &det);
@@ -1108,7 +1119,8 @@ impl Engine {
                     ));
                     break;
                 }
-                det.notes.push(format!("级联解包（第 {nested_depth} 层）：{inner_name}"));
+                det.notes
+                    .push(format!("级联解包（第 {nested_depth} 层）：{inner_name}"));
             }
 
             if nested_depth > 0 {
@@ -1179,8 +1191,10 @@ impl Engine {
             }
         }
 
-        // --- record the fingerprint (skipped by dry runs) ---------------------
-        if !fp.is_empty() {
+        // --- record the fingerprint (only when skipping is enabled) ----------
+        // With skip_processed off (the default) nothing is recorded, so a manual
+        // run can never make a later run silently skip the same archive.
+        if cfg.skip_processed && !fp.is_empty() {
             self.processed_lock()
                 .insert(&fp, &plan.dest_root, "success");
         }
@@ -1231,11 +1245,17 @@ impl Engine {
             .or_else(|| path.parent().map(Path::to_path_buf))
             .unwrap_or_else(|| PathBuf::from("."));
         if let Err(e) = fs::create_dir_all(&parent) {
-            return Err(UpError::Other(format!("无法创建 {}：{e}", parent.display())));
+            return Err(UpError::Other(format!(
+                "无法创建 {}：{e}",
+                parent.display()
+            )));
         }
         let staging = parent.join(format!("{}{}", crate::TMP_PREFIX, Uuid::new_v4().simple()));
         if let Err(e) = fs::create_dir_all(&staging) {
-            return Err(UpError::Other(format!("无法创建 {}：{e}", staging.display())));
+            return Err(UpError::Other(format!(
+                "无法创建 {}：{e}",
+                staging.display()
+            )));
         }
         staging_guard.set(staging.clone());
 
@@ -1303,7 +1323,8 @@ impl Engine {
             let input = path.to_path_buf();
             let password = cand.password.clone();
             let check =
-                tokio::task::spawn_blocking(move || ssefe::verify_password(&input, &password)).await;
+                tokio::task::spawn_blocking(move || ssefe::verify_password(&input, &password))
+                    .await;
             let ok = match check {
                 Ok(Ok(accepted)) => accepted,
                 Ok(Err(SsefeError::Cancelled)) => return Err(UpError::Cancelled),
@@ -1522,15 +1543,8 @@ impl Engine {
             if !wait_pause_or_cancel(gate, cancel).await {
                 return Err(SsefeError::Cancelled);
             }
-            match ssefe::decrypt_to_temp(
-                id,
-                input,
-                &cand.password,
-                staging_parent,
-                cancel,
-                emit,
-            )
-            .await
+            match ssefe::decrypt_to_temp(id, input, &cand.password, staging_parent, cancel, emit)
+                .await
             {
                 Ok(path) => {
                     *tried = cand.tried;
@@ -1756,9 +1770,7 @@ impl Engine {
         }
         let moved = crate::util::move_path(&entries[0], plain_path);
         let _ = remove_path(&sub);
-        moved.map_err(|error| {
-            SsefeError::Io(format!("无法写入 {}：{error}", plain_path.display()))
-        })
+        moved.map_err(|error| SsefeError::Io(format!("无法写入 {}：{error}", plain_path.display())))
     }
 
     /// List the plaintext archive produced by SSEFE decryption and unlock its
@@ -1951,8 +1963,10 @@ mod tests {
 
     #[test]
     fn scrub_removes_symlinks_and_keeps_regular_files() {
-        let dir = std::env::temp_dir()
-            .join(format!("unparanoia-scrub-{}", uuid::Uuid::new_v4().simple()));
+        let dir = std::env::temp_dir().join(format!(
+            "unparanoia-scrub-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("ok.txt"), b"ok").unwrap();
         std::fs::write(dir.join("sub").join("deep.txt"), b"ok").unwrap();
@@ -2072,6 +2086,7 @@ mod tests {
             )
             .await;
         assert_eq!(outcome.status, Some(TaskStatus::Skipped));
+        assert_eq!(outcome.related_paths, vec![only.clone()]);
         let reason = outcome.reason.unwrap_or_default();
         assert!(reason.contains("请添加第一卷"), "reason: {reason}");
         assert!(reason.contains("sample.7z.001"), "reason: {reason}");
@@ -2089,6 +2104,7 @@ mod tests {
             )
             .await;
         assert_eq!(outcome.status, Some(TaskStatus::Skipped));
+        assert_eq!(outcome.related_paths, vec![only_enc.clone()]);
         let reason = outcome.reason.unwrap_or_default();
         assert!(reason.contains("请添加第一卷"), "reason: {reason}");
         assert!(reason.contains("sample.7z.001.enc"), "reason: {reason}");
@@ -2145,6 +2161,18 @@ mod tests {
             "reason: {:?} warnings: {:?}",
             outcome.reason,
             outcome.warnings
+        );
+        // The whole split family is reported so the GUI can mark every row.
+        assert!(
+            outcome.related_paths.len() >= 2,
+            "related_paths: {:?}",
+            outcome.related_paths
+        );
+        assert_eq!(outcome.related_paths[0], first);
+        assert!(
+            outcome.related_paths.iter().all(|p| p.exists()),
+            "related_paths: {:?}",
+            outcome.related_paths
         );
         let extracted = out_root.join("big.bin");
         assert!(
@@ -2215,6 +2243,7 @@ mod tests {
             )
             .await;
         assert_eq!(outcome.status, Some(TaskStatus::Failed));
+        assert_eq!(outcome.related_paths, vec![first.clone()]);
         let reason = outcome.reason.unwrap_or_default();
         assert!(reason.contains("缺少后续卷"), "reason: {reason}");
         assert!(
@@ -2239,14 +2268,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let payload = vec![0x44u8; 3 * 1024 * 1024];
         std::fs::write(dir.join("inner.bin"), &payload).unwrap();
-        assert!(
-            std::process::Command::new(&seven_zip.exe)
-                .args(["a", "-t7z", "-mx=0", "-v1m", "inner.7z", "inner.bin"])
-                .current_dir(&dir)
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(std::process::Command::new(&seven_zip.exe)
+            .args(["a", "-t7z", "-mx=0", "-v1m", "inner.7z", "inner.bin"])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
         let mut volumes: Vec<PathBuf> = std::fs::read_dir(&dir)
             .unwrap()
             .flatten()
@@ -2259,18 +2286,21 @@ mod tests {
             .collect();
         volumes.sort();
         assert!(volumes.len() >= 2);
-        let mut zip_args: Vec<String> = vec!["a".into(), "-tzip".into(), "-mx=0".into(), "outer.zip".into()];
+        let mut zip_args: Vec<String> = vec![
+            "a".into(),
+            "-tzip".into(),
+            "-mx=0".into(),
+            "outer.zip".into(),
+        ];
         for volume in &volumes {
             zip_args.push(volume.file_name().unwrap().to_string_lossy().to_string());
         }
-        assert!(
-            std::process::Command::new(&seven_zip.exe)
-                .args(&zip_args)
-                .current_dir(&dir)
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(std::process::Command::new(&seven_zip.exe)
+            .args(&zip_args)
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
         let out_root = dir.join("out");
         std::fs::create_dir_all(&out_root).unwrap();
         let mut cfg = RunConfig::default();
@@ -2297,7 +2327,10 @@ mod tests {
         );
         let extracted = out_root.join("inner.bin");
         assert!(extracted.exists(), "missing {:?}", extracted);
-        assert_eq!(std::fs::metadata(&extracted).unwrap().len(), payload.len() as u64);
+        assert_eq!(
+            std::fs::metadata(&extracted).unwrap().len(),
+            payload.len() as u64
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2317,17 +2350,21 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let payload = vec![0x6bu8; 3 * 1024 * 1024];
         std::fs::write(dir.join("inner.bin"), &payload).unwrap();
-        assert!(
-            std::process::Command::new(&seven_zip.exe)
-                .args([
-                    "a", "-t7z", "-mx=0", "-v1m", "-pinner-secret", "-mhe=on", "inner.7z",
-                    "inner.bin",
-                ])
-                .current_dir(&dir)
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(std::process::Command::new(&seven_zip.exe)
+            .args([
+                "a",
+                "-t7z",
+                "-mx=0",
+                "-v1m",
+                "-pinner-secret",
+                "-mhe=on",
+                "inner.7z",
+                "inner.bin",
+            ])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
         let mut volumes: Vec<PathBuf> = std::fs::read_dir(&dir)
             .unwrap()
             .flatten()
@@ -2379,6 +2416,22 @@ mod tests {
             outcome.reason,
             outcome.warnings
         );
+        assert_eq!(
+            outcome.related_paths.len(),
+            volumes.len(),
+            "related_paths: {:?}",
+            outcome.related_paths
+        );
+        assert_eq!(outcome.related_paths[0], first);
+        assert!(
+            outcome.related_paths.iter().all(|p| p
+                .extension()
+                .map(|ext| ext == "enc")
+                .unwrap_or(false)
+                && p.exists()),
+            "related_paths: {:?}",
+            outcome.related_paths
+        );
         let extracted = out_root.join("inner.bin");
         assert!(extracted.exists(), "missing {:?}", extracted);
         assert_eq!(
@@ -2386,6 +2439,66 @@ mod tests {
             payload.len() as u64
         );
         assert_eq!(outcome.files, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `skip_processed` is opt-in: a default run must not record a fingerprint,
+    /// otherwise a manual run could silently hide the archive from the next batch.
+    #[tokio::test]
+    async fn processed_store_only_records_when_skip_is_on() {
+        let Ok(seven_zip) = SevenZip::locate(None) else {
+            eprintln!("7-Zip not available; skipping processed gating test");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "unparanoia-processed-gate-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("hello.txt"), b"hello").unwrap();
+        assert!(std::process::Command::new(&seven_zip.exe)
+            .args(["a", "-tzip", "-mx=0", "hello.zip", "hello.txt"])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
+        let archive = dir.join("hello.zip");
+        let exe = seven_zip.exe.clone();
+
+        for (skip, expected) in [(false, 0usize), (true, 1usize)] {
+            let tag = if skip { "skip" } else { "noskip" };
+            let out_root = dir.join(format!("out-{tag}"));
+            std::fs::create_dir_all(&out_root).unwrap();
+            let mut cfg = RunConfig::default();
+            cfg.output_root = Some(out_root);
+            cfg.jobs = 1;
+            cfg.nested = false;
+            cfg.skip_processed = skip;
+            cfg.processed_path = Some(dir.join(format!("{tag}.json")));
+            let engine = Engine::new(SevenZip::new(exe.clone()), cfg);
+            let outcome = engine
+                .process_file(
+                    1,
+                    &archive,
+                    &CancelToken::new(),
+                    &PauseGate::new(),
+                    &mut |_| {},
+                )
+                .await;
+            assert_eq!(
+                outcome.status,
+                Some(TaskStatus::Success),
+                "reason: {:?}",
+                outcome.reason
+            );
+            assert_eq!(
+                engine.processed_count(),
+                expected,
+                "skip_processed={skip} must record {expected} fingerprint(s)"
+            );
+            // Nothing is persisted until a batch explicitly saves.
+            assert!(!dir.join(format!("{tag}.json")).exists());
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

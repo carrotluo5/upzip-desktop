@@ -1,8 +1,8 @@
 # 输出布局与处理流程（OUTPUT-LAYOUT）
 
-本文描述 v0.3.1（Unparanoia）解包引擎**实际写入磁盘的行为**：目录怎么决定、内层怎么落盘、
+本文描述 v0.3.2（Unparanoia）解包引擎**实际写入磁盘的行为**：目录怎么决定、内层怎么落盘、
 分段压缩包怎么聚合、冲突怎么办、临时与残留如何管理、口令怎么重试、失败/跳过的判定。
-所有规则以代码为准，位置指向 `crates/unpack-core/src/`（2026-10-24 v0.3.1 工作树；
+所有规则以代码为准，位置指向 `crates/unpack-core/src/`（2026-10-24 v0.3.2 工作树；
 函数名比行号更稳）。
 
 ## 1. 一次处理的任务阶段
@@ -93,7 +93,8 @@ staging 内部，不会额外多包一层。
 
 - **聚合**：同目录/同批输入中同家族的卷合并为**一个对话框任务**，7-Zip 只从首卷进入；
   用户把 `.001` 与 `.002` 一起拖入不会产生两个任务，也不会重复解压。只给首卷时，
-  同目录其余卷会被自动发现。
+  同目录其余卷会被自动发现。**v0.3.2** 起 GUI 队列中同族卷行归并到首卷任务
+  （`TaskOutcome.related_paths` 给出该族全部卷路径，GUI 据此合行并识别“全跳过”）。
 - **布局**：`3138.7z.001` + `.002` → 输出 `3138/`（见 §2 的 stem 规则）。
 - **只给非首卷**（例如只有 `.002`、没有 `.001`）：状态 `Skipped`（CLI exit 0），
   原因文案「分卷压缩包：请添加第一卷（.001 / .part1.rar）；期望首卷：<名字>」。
@@ -162,13 +163,19 @@ truncated.7z.001.enc（只有首卷）              -> Failed「缺少后续卷�
 
 ## 6. 跳过与重试
 
-- `skip_processed` 默认开启：成功处理过的输入会以 fingerprint
-  （size + 小写文件名 + 头部 8 MiB 的 SHA-256，`util.rs:29-40`）记进
-  `processed.json`（配置目录，默认 `~/Library/Application Support/unparanoia/`
-  / `%APPDATA%\unparanoia\`）。再次处理同一文件会显示
-  "跳过：已处理过" 并以成功计（exit 0），**不产生输出**。
-  - 验证/重跑请加 `--no-skip-processed`（CLI）或清空配置目录。
-  - GUI 设置页可关闭 skip_processed，并有"忘记处理记录"按钮。
+- **`skip_processed` 自 v0.3.2 起默认关闭**（旧配置一次性迁移：`settings.json` 缺
+  `settingsVersion`/<2 时写入 `settingsVersion=2` 且 `skip_processed=false`）。
+  默认每次都会真正重新解压，不生成 `processed.json`、不写处理记录。
+- 只有显式开启（CLI `--skip-processed`，或 GUI 设置页开关）后才有跳过行为：
+  成功处理过的输入会以 fingerprint（size + 小写文件名 + 头部 8 MiB 的 SHA-256，
+  `util.rs:29-40`）记进 `processed.json`（配置目录，默认
+  `~/Library/Application Support/unparanoia/` / `%APPDATA%\unparanoia\`）。
+  再次处理同一文件会显示「已处理过（历史记录跳过）：如需重新解压请点「重新解压」
+  或在设置中关闭「跳过已处理」」并以成功计（exit 0），**不产生输出**。
+  - 验证/重跑时不要开跳过；若之前开启过并写入了记录，可删除 `processed.json`、
+    GUI 设置页「清除处理记录」，或改用另一个配置目录。
+  - 旧 CLI 参数 `--no-skip-processed` 仍被接受，但已是兼容 no-op（默认本来就不跳过）。
+  - GUI 对“全跳过”的批次显示提示条，提供「清除处理记录」/「全部重新解压」。
 - `stop_on_error` 默认 false：单任务失败不终止整批；开启后首个失败即停止后续任务。
 - 失败任务的输出不进入 processed 记录，可直接重试。
 - 需要密码（`NeedsPassword`）不算失败输出：不写任何文件，CLI exit 1，
@@ -205,4 +212,5 @@ truncated.7z.001.enc（只有首卷）              -> Failed「缺少后续卷�
 | 分卷家族识别/聚合/缺卷检测 | `crates/unpack-core/src/split.rs` |
 | 7-Zip 调用、密码检测、列表解析 | `crates/unpack-core/src/sevenzip.rs` |
 | SSEFE 解密与内层 ZIP 归一化 | `crates/unpack-core/src/ssefe.rs` |
-| processed.json / settings.json | `crates/unpack-core/src/processed.rs`、`settings.rs` |
+| processed.json / settings.json（含 v0.3.2 `settingsVersion` 迁移） | `crates/unpack-core/src/processed.rs`、`settings.rs` |
+| `related_paths`（分卷族归并，v0.3.2） | `crates/unpack-core/src/types.rs`、`engine.rs`（`TaskOutcome`） |

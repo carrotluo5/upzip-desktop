@@ -95,10 +95,7 @@ pub fn unique_sibling(target: &Path, source_is_dir: bool) -> PathBuf {
     if !target.exists() {
         return target.to_path_buf();
     }
-    let parent = target
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_default();
+    let parent = target.parent().map(|p| p.to_path_buf()).unwrap_or_default();
     let full_name = target
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -376,7 +373,8 @@ mod tests {
     /// appended to the whole name, not inserted before "5".
     #[test]
     fn unique_sibling_for_dotted_directory_names() {
-        let dir = std::env::temp_dir().join(format!("paranoia-layout-dir-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("paranoia-layout-dir-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let d = dir.join("别礼-仙女v1.5（内附切换）by hajimicat");
         std::fs::create_dir_all(&d).unwrap();
@@ -460,13 +458,8 @@ mod tests {
         let nested = dir.join("nested");
         std::fs::create_dir_all(nested.join("pkg").join("sub")).unwrap();
         std::fs::write(nested.join("pkg").join("sub").join("inner.txt"), b"Y").unwrap();
-        let st2 = move_with_policy(
-            &nested.join("pkg"),
-            &renamed,
-            ConflictPolicy::Rename,
-            false,
-        )
-        .unwrap();
+        let st2 =
+            move_with_policy(&nested.join("pkg"), &renamed, ConflictPolicy::Rename, false).unwrap();
         assert_eq!(st2.renamed, 1, "inner file renamed on merge");
         assert!(renamed.join("sub").join("inner (1).txt").exists());
         let _ = std::fs::remove_dir_all(&dir);

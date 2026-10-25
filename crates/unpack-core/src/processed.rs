@@ -111,8 +111,10 @@ impl ProcessedStore {
             version: 1,
             records: self.records.clone(),
         };
-        let json = serde_json::to_vec_pretty(&payload).map_err(|e| format!("序列化处理记录失败：{e}"))?;
-        crate::util::write_file_atomic(&self.path, &json).map_err(|e| format!("写入处理记录失败：{e}"))
+        let json =
+            serde_json::to_vec_pretty(&payload).map_err(|e| format!("序列化处理记录失败：{e}"))?;
+        crate::util::write_file_atomic(&self.path, &json)
+            .map_err(|e| format!("写入处理记录失败：{e}"))
     }
 
     /// Delete the backing file and clear memory; returns the number of dropped records.
@@ -121,7 +123,10 @@ impl ProcessedStore {
         let dropped = self.records.len();
         if let Err(error) = std::fs::remove_file(&self.path) {
             if error.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("warn: cannot delete processed store {}: {error}", self.path.display());
+                eprintln!(
+                    "warn: cannot delete processed store {}: {error}",
+                    self.path.display()
+                );
             }
         }
         self.records.clear();

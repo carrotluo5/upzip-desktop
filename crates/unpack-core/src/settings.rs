@@ -13,6 +13,12 @@ use crate::types::{ConflictPolicy, LayoutPolicy, RunConfig};
 
 pub const SETTINGS_FILE_NAME: &str = "settings.json";
 
+/// Schema version persisted as `settingsVersion`.
+///
+/// - `0` = field absent (settings.json written by v0.3.0/v0.3.1)
+/// - `2` = current: `skipProcessed` defaults to false (explicit opt-in)
+pub const SETTINGS_VERSION: u32 = 2;
+
 /// UI colour theme, persisted with the settings and rendered by the GUI only.
 ///
 /// The engine never reads it; it exists here so the Tauri bridge can round-trip
@@ -59,6 +65,12 @@ pub struct Settings {
     pub min_free_ratio: f64,
     /// GUI colour theme (system / light / dark). Not part of `RunConfig`.
     pub theme: ThemeMode,
+    /// Persisted settings schema version (see [`SETTINGS_VERSION`]).
+    ///
+    /// Missing in files written before v0.3.2 → `0` (field-level serde
+    /// default), which `load_from` migrates once. Always `2` after `save`.
+    #[serde(default)]
+    pub settings_version: u32,
 }
 
 impl Default for Settings {
@@ -82,6 +94,7 @@ impl Default for Settings {
             recursive: base.recursive,
             min_free_ratio: base.min_free_ratio,
             theme: ThemeMode::System,
+            settings_version: SETTINGS_VERSION,
         }
     }
 }
@@ -102,8 +115,8 @@ impl Settings {
     /// the next `save()` always writes to the new location.
     pub fn load() -> Self {
         let new_path = Self::path();
-        let legacy_path = unparanoia_core::config::legacy_config_dir()
-            .map(|dir| dir.join(SETTINGS_FILE_NAME));
+        let legacy_path =
+            unparanoia_core::config::legacy_config_dir().map(|dir| dir.join(SETTINGS_FILE_NAME));
         Self::load_with_paths(new_path.as_deref(), legacy_path.as_deref())
     }
 
@@ -124,10 +137,28 @@ impl Settings {
     }
 
     /// Load from an explicit path (used by tests and the CLI).
+    ///
+    /// Files from before v0.3.2 (no `settingsVersion`) are migrated once: the
+    /// old `skipProcessed: true` default is reset to `false` so a stale
+    /// fingerprint record can never silently hide the user's archive again.
     pub fn load_from(path: &Path) -> Self {
         match std::fs::read(path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+            Ok(bytes) => match serde_json::from_slice::<Settings>(&bytes) {
+                Ok(mut settings) => {
+                    settings.migrate();
+                    settings
+                }
+                Err(_) => Self::default(),
+            },
             Err(_) => Self::default(),
+        }
+    }
+
+    /// One-time in-memory migration of a deserialized settings file.
+    fn migrate(&mut self) {
+        if self.settings_version < SETTINGS_VERSION {
+            self.skip_processed = false;
+            self.settings_version = SETTINGS_VERSION;
         }
     }
 
@@ -145,7 +176,11 @@ impl Settings {
 
     /// Convert to the engine `RunConfig`. Clamps user-editable values so a bad
     /// `settings.json` cannot make the engine spin up 1000 workers or recurse forever.
-    pub fn to_run_config(&self, passwords: Vec<String>, processed_path: Option<PathBuf>) -> RunConfig {
+    pub fn to_run_config(
+        &self,
+        passwords: Vec<String>,
+        processed_path: Option<PathBuf>,
+    ) -> RunConfig {
         RunConfig {
             output_root: self.output_root.clone(),
             conflict: self.conflict,
@@ -192,7 +227,8 @@ mod tests {
         let s = Settings::default();
         assert_eq!(s.jobs, 2);
         assert_eq!(s.max_depth, 4);
-        assert!(s.skip_processed);
+        assert!(!s.skip_processed, "skip_processed is opt-in since v0.3.2");
+        assert_eq!(s.settings_version, SETTINGS_VERSION);
         assert!(s.strip_junk);
         assert!(s.nested);
         assert!(s.recursive);
@@ -210,7 +246,12 @@ mod tests {
         assert_eq!(s.jobs, 4);
         assert_eq!(s.max_depth, 6);
         assert!(!s.skip_processed);
-        assert_eq!(s.output_root.as_deref(), Some(std::path::Path::new("/tmp/out")));
+        assert_eq!(
+            s.output_root.as_deref(),
+            Some(std::path::Path::new("/tmp/out"))
+        );
+        // A file without the version field reports 0 until it is loaded/migrated.
+        assert_eq!(s.settings_version, 0);
         // Untouched fields use the default.
         assert!(s.strip_junk);
         assert_eq!(s.conflict, ConflictPolicy::Rename);
@@ -235,6 +276,7 @@ mod tests {
         assert_eq!(loaded.jobs, 5);
         assert_eq!(loaded.max_depth, 2);
         assert_eq!(loaded.output_root, s.output_root);
+        assert_eq!(loaded.settings_version, SETTINGS_VERSION);
         // Corrupt / missing files never panic.
         fs::write(&path, b"{not json").unwrap();
         let loaded = Settings::load_from(&path);
@@ -260,6 +302,39 @@ mod tests {
         assert_eq!(cfg.passwords, vec!["pw".to_string()]);
         assert!(!cfg.dry_run);
         assert_eq!(cfg.processed_path, None);
+    }
+
+    #[test]
+    fn legacy_files_without_version_migrate_skip_processed() {
+        let dir = temp_dir("migrate");
+        let path = dir.join("settings.json");
+
+        // v0.3.1 file: skipProcessed defaulted to true and there is no version.
+        fs::write(&path, b"{\"skipProcessed\":true}").unwrap();
+        let s = Settings::load_from(&path);
+        assert!(
+            !s.skip_processed,
+            "stale skip flag must not survive the upgrade"
+        );
+        assert_eq!(s.settings_version, SETTINGS_VERSION);
+
+        // Current file: an explicit opt-in is preserved.
+        let current = format!("{{\"settingsVersion\":{SETTINGS_VERSION},\"skipProcessed\":true}}");
+        fs::write(&path, current).unwrap();
+        let s = Settings::load_from(&path);
+        assert!(s.skip_processed);
+        assert_eq!(s.settings_version, SETTINGS_VERSION);
+
+        // Saving always stamps the current version (migrated exactly once).
+        let mut s = Settings::default();
+        s.skip_processed = true;
+        s.save_to(&path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"settingsVersion\": 2"), "settings: {text}");
+        assert!(text.contains("\"skipProcessed\": true"), "settings: {text}");
+        let reloaded = Settings::load_from(&path);
+        assert!(reloaded.skip_processed);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -309,10 +384,8 @@ mod tests {
         assert_eq!(s.theme, ThemeMode::Light);
 
         // Neither file -> defaults.
-        let s = Settings::load_with_paths(
-            Some(&dir.join("absent.json")),
-            Some(&dir.join("nope.json")),
-        );
+        let s =
+            Settings::load_with_paths(Some(&dir.join("absent.json")), Some(&dir.join("nope.json")));
         assert_eq!(s.jobs, Settings::default().jobs);
 
         // A corrupt new file still wins over a valid legacy file (no surprise

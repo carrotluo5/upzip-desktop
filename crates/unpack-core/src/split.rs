@@ -358,11 +358,7 @@ pub fn group_inputs(files: &[PathBuf]) -> Vec<PathBuf> {
                 if emitted.insert(key.clone()) {
                     let representative = families
                         .get(key)
-                        .map(|info| {
-                            info.first
-                                .clone()
-                                .unwrap_or_else(|| info.lowest.1.clone())
-                        })
+                        .map(|info| info.first.clone().unwrap_or_else(|| info.lowest.1.clone()))
                         .unwrap_or_else(|| file.clone());
                     out.push(representative);
                 }
@@ -533,10 +529,7 @@ mod tests {
 
     #[test]
     fn group_inputs_keeps_later_volume_representative_when_first_missing() {
-        let files = vec![
-            PathBuf::from("/in/x.7z.003"),
-            PathBuf::from("/in/x.7z.002"),
-        ];
+        let files = vec![PathBuf::from("/in/x.7z.003"), PathBuf::from("/in/x.7z.002")];
         let grouped = group_inputs(&files);
         assert_eq!(grouped, vec![PathBuf::from("/in/x.7z.002")]);
     }

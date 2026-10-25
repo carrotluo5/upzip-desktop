@@ -166,18 +166,18 @@ impl From<DecryptError> for SsefeError {
             DecryptError::Io(error) => SsefeError::Io(error.to_string()),
             DecryptError::TooShort | DecryptError::Truncated => SsefeError::Truncated,
             DecryptError::BadMagic => SsefeError::NotSsefe,
-            DecryptError::UnsupportedVersion(version) => {
-                SsefeError::Other(format!("不支持的 Paranoia 格式版本：{version}（仅支持 v4）"))
-            }
-            DecryptError::UnsupportedAlgorithm(algorithm) => {
-                SsefeError::Other(format!("不支持的加密算法 {algorithm:#04x}（仅支持 AES-256）"))
-            }
+            DecryptError::UnsupportedVersion(version) => SsefeError::Other(format!(
+                "不支持的 Paranoia 格式版本：{version}（仅支持 v4）"
+            )),
+            DecryptError::UnsupportedAlgorithm(algorithm) => SsefeError::Other(format!(
+                "不支持的加密算法 {algorithm:#04x}（仅支持 AES-256）"
+            )),
             DecryptError::InvalidCustomParams(params) => {
                 SsefeError::Other(format!("无效的 KDF 参数自定义字节 {params:#04x}"))
             }
-            DecryptError::UnsupportedRecovery => {
-                SsefeError::Other("该文件是 Paranoia 恢复容器（PFTEREC1），当前版本不支持".to_string())
-            }
+            DecryptError::UnsupportedRecovery => SsefeError::Other(
+                "该文件是 Paranoia 恢复容器（PFTEREC1），当前版本不支持".to_string(),
+            ),
             DecryptError::WrongPassword => SsefeError::WrongPassword,
             DecryptError::Integrity => SsefeError::Integrity,
             other => SsefeError::Other(other.to_string()),
@@ -385,7 +385,11 @@ pub async fn decrypt_to_temp(
     };
     std::fs::create_dir_all(&dir)
         .map_err(|error| SsefeError::Io(format!("无法创建临时目录 {}: {error}", dir.display())))?;
-    let out_zip = dir.join(format!("{}{}.zip", crate::TMP_PREFIX, uuid::Uuid::new_v4().simple()));
+    let out_zip = dir.join(format!(
+        "{}{}.zip",
+        crate::TMP_PREFIX,
+        uuid::Uuid::new_v4().simple()
+    ));
 
     emit(TaskEvent::TaskProgress {
         id,
@@ -481,7 +485,12 @@ mod tests {
         // Header with an unsupported version is not "SSEFE v4".
         let mut wrong_version = fake_ssefe(SSEFE_MIN_LEN as usize);
         wrong_version[5] = 3;
-        assert!(probe_head(&wrong_version, wrong_version.len() as u64, Path::new("v3.enc")).is_none());
+        assert!(probe_head(
+            &wrong_version,
+            wrong_version.len() as u64,
+            Path::new("v3.enc")
+        )
+        .is_none());
     }
 
     #[test]
@@ -507,13 +516,19 @@ mod tests {
         let prefixed_path = dir.join("prefixed.zip");
         fs::write(&prefixed_path, &prefixed).unwrap();
         assert!(normalize_inner_zip(&prefixed_path).unwrap());
-        assert_eq!(fs::read(&prefixed_path).unwrap(), b"PK\x03\x04zip-body".to_vec());
+        assert_eq!(
+            fs::read(&prefixed_path).unwrap(),
+            b"PK\x03\x04zip-body".to_vec()
+        );
 
         // Already a ZIP -> untouched.
         let plain_path = dir.join("plain.zip");
         fs::write(&plain_path, b"PK\x03\x04zip-body").unwrap();
         assert!(!normalize_inner_zip(&plain_path).unwrap());
-        assert_eq!(fs::read(&plain_path).unwrap(), b"PK\x03\x04zip-body".to_vec());
+        assert_eq!(
+            fs::read(&plain_path).unwrap(),
+            b"PK\x03\x04zip-body".to_vec()
+        );
 
         // Not a checkcode -> untouched (corruption must stay visible).
         let garbage_path = dir.join("garbage.bin");
@@ -535,8 +550,14 @@ mod tests {
         assert!(integrity.message().contains("完整性校验失败"));
         assert_ne!(wrong.kind(), integrity.kind());
         assert_eq!(SsefeError::Cancelled.message(), "已取消");
-        assert!(SsefeError::from(DecryptError::Integrity).message().contains("完整性"));
-        assert!(SsefeError::from(DecryptError::WrongPassword).message().contains("密码错误"));
-        assert!(SsefeError::from(DecryptError::BadMagic).message().contains("不是 Paranoia"));
+        assert!(SsefeError::from(DecryptError::Integrity)
+            .message()
+            .contains("完整性"));
+        assert!(SsefeError::from(DecryptError::WrongPassword)
+            .message()
+            .contains("密码错误"));
+        assert!(SsefeError::from(DecryptError::BadMagic)
+            .message()
+            .contains("不是 Paranoia"));
     }
 }

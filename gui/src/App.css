@@ -1008,6 +1008,25 @@ td.empty {
 }
 
 
+/* ------------------------------------------------------------ 跳过提示条 */
+
+.skipnotice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid rgba(240, 179, 82, 0.55);
+  border-radius: 8px;
+  background: rgba(240, 179, 82, 0.1);
+  color: var(--fg);
+  font-size: 12px;
+}
+
+.skipnotice .spacer {
+  flex: 1 1 auto;
+}
+
 /* ---------------------------------------------------------- 许可证弹层 */
 
 .licenseoverlay {

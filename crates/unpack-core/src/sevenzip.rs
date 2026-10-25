@@ -15,6 +15,8 @@
 //!   `UPZIP_7Z_PW_MODE` is still accepted).
 
 use std::collections::BTreeMap;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -31,6 +33,22 @@ pub const EXIT_ERROR: i32 = 2;
 pub const EXIT_NEEDS_PASSWORD: i32 = 255;
 
 const MAX_CAPTURE: usize = 8 * 1024 * 1024;
+
+/// Windows: never open a console window for a child process. Without this a GUI
+/// build flashes a black console window every time 7z.exe is spawned.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Windows spawn errors worth retrying: the executable is momentarily locked by
+/// antivirus or the system (5 = access denied, 32 = sharing violation,
+/// 225 = scanner still holding a fresh file).
+const RETRYABLE_SPAWN_ERRORS: [i32; 3] = [5, 32, 225];
+/// How many times a retryable spawn error is retried (150 ms apart).
+const SPAWN_RETRIES: u32 = 3;
+const SPAWN_RETRY_DELAY: Duration = Duration::from_millis(150);
+
+/// How much of the 7-Zip stderr tail is quoted in an error message.
+const ERROR_TAIL_LIMIT: usize = 1000;
 
 #[derive(Debug, Clone, Default)]
 pub struct ListEntry {
@@ -116,7 +134,11 @@ impl ListResult {
     }
 
     pub fn total_uncompressed(&self) -> u64 {
-        self.entries.iter().filter(|e| !e.is_dir).map(|e| e.size).sum()
+        self.entries
+            .iter()
+            .filter(|e| !e.is_dir)
+            .map(|e| e.size)
+            .sum()
     }
 
     pub fn file_count(&self) -> usize {
@@ -198,10 +220,7 @@ impl SevenZip {
     }
 
     pub fn with_password_mode(exe: PathBuf, password_mode: PasswordMode) -> Self {
-        Self {
-            exe,
-            password_mode,
-        }
+        Self { exe, password_mode }
     }
 
     /// Resolve the 7-Zip binary. Search order:
@@ -293,7 +312,11 @@ impl SevenZip {
     }
 
     pub fn version(&self) -> String {
-        match std::process::Command::new(&self.exe).output() {
+        #[allow(unused_mut)]
+        let mut cmd = std::process::Command::new(&self.exe);
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        match cmd.output() {
             Ok(o) => {
                 let text = String::from_utf8_lossy(&o.stdout);
                 text.lines()
@@ -316,7 +339,6 @@ impl SevenZip {
         cancel: &CancelToken,
         on_line: &mut (dyn FnMut(&str) + Send),
     ) -> Result<(i32, String, String)> {
-        let mut cmd = Command::new(&self.exe);
         // Argv mode: inject `-p<pw>` right after the command word. Empty
         // passwords are skipped — a bare `-p` would make 7-Zip prompt, and
         // stdin is closed in that case, so the run would fail confusingly.
@@ -334,18 +356,28 @@ impl SevenZip {
             _ => None,
         };
 
-        cmd.args(effective_args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdin(if stdin_password.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            });
-        let mut child = cmd.spawn().map_err(|e| UpError::SevenZipFailed {
-            code: -1,
-            message: format!("failed to spawn {:?}: {e}", self.exe),
-        })?;
+        // Spawn with a fresh command on every attempt: Windows antivirus or an
+        // installer may briefly hold the bundled 7z.exe (5 / 32 / 225).
+        let mut attempt: u32 = 0;
+        let mut child = loop {
+            let mut cmd = base_command(&self.exe);
+            cmd.args(effective_args)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .stdin(if stdin_password.is_some() {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                });
+            match cmd.spawn() {
+                Ok(child) => break child,
+                Err(e) if is_retryable_spawn_error(e.raw_os_error()) && attempt < SPAWN_RETRIES => {
+                    attempt += 1;
+                    tokio::time::sleep(SPAWN_RETRY_DELAY).await;
+                }
+                Err(e) => return Err(spawn_failure(&self.exe, &e)),
+            }
+        };
 
         if let Some(pw) = stdin_password {
             if let Some(mut si) = child.stdin.take() {
@@ -445,7 +477,10 @@ impl SevenZip {
 
         let status = child.wait().await.map_err(|e| UpError::SevenZipFailed {
             code: -1,
-            message: format!("wait failed: {e}"),
+            message: format!(
+                "无法等待 7-Zip 进程结束（{}）：{e}。可设置 UNPARANOIA_7Z 指向已安装的 7-Zip（7zz / 7z.exe）。",
+                self.exe.display()
+            ),
         })?;
         let err_text = err_task.await.unwrap_or_default();
         Ok((status.code().unwrap_or(-1), out_buf, err_text))
@@ -465,7 +500,13 @@ impl SevenZip {
             archive.to_string_lossy().into_owned(),
         ];
         let (code, out, err) = self
-            .run(&args, password, Some(Duration::from_secs(600)), cancel, &mut |_| {})
+            .run(
+                &args,
+                password,
+                Some(Duration::from_secs(600)),
+                cancel,
+                &mut |_| {},
+            )
             .await?;
         let text = format!("{out}\n{err}");
         match code {
@@ -477,16 +518,10 @@ impl SevenZip {
                 } else if looks_like_not_archive(&text) {
                     Err(UpError::NotAnArchive(archive.to_path_buf()))
                 } else {
-                    Err(UpError::SevenZipFailed {
-                        code,
-                        message: tail_text(&text),
-                    })
+                    Err(sevenzip_failure(&self.exe, code, &text))
                 }
             }
-            c => Err(UpError::SevenZipFailed {
-                code: c,
-                message: tail_text(&text),
-            }),
+            c => Err(sevenzip_failure(&self.exe, c, &text)),
         }
     }
 
@@ -508,7 +543,13 @@ impl SevenZip {
             archive.to_string_lossy().into_owned(),
         ];
         let (code, out, err) = self
-            .run(&args, None, Some(Duration::from_secs(600)), cancel, &mut |_| {})
+            .run(
+                &args,
+                None,
+                Some(Duration::from_secs(600)),
+                cancel,
+                &mut |_| {},
+            )
             .await?;
         if code == EXIT_OK || code == EXIT_WARNING {
             return Ok(None);
@@ -607,9 +648,7 @@ impl SevenZip {
             format!("-o{}", dest.to_string_lossy()),
             archive.to_string_lossy().into_owned(),
         ];
-        let (code, out, err) = self
-            .run(&args, password, None, cancel, on_line)
-            .await?;
+        let (code, out, err) = self.run(&args, password, None, cancel, on_line).await?;
         let text = format!("{out}\n{err}");
         match code {
             EXIT_OK => Ok(ExtractStats { warnings: 0 }),
@@ -623,16 +662,10 @@ impl SevenZip {
                 } else if looks_like_not_archive(&text) {
                     Err(UpError::NotAnArchive(archive.to_path_buf()))
                 } else {
-                    Err(UpError::SevenZipFailed {
-                        code,
-                        message: tail_text(&text),
-                    })
+                    Err(sevenzip_failure(&self.exe, code, &text))
                 }
             }
-            c => Err(UpError::SevenZipFailed {
-                code: c,
-                message: tail_text(&text),
-            }),
+            c => Err(sevenzip_failure(&self.exe, c, &text)),
         }
     }
 }
@@ -675,9 +708,67 @@ fn tail_text(text: &str) -> String {
             .rev()
             .collect()
     } else {
-        lines.into_iter().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect()
+        lines
+            .into_iter()
+            .rev()
+            .take(6)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
     };
     tail.join(" | ")
+}
+
+/// Build the async 7-Zip command, hiding the extra console window on Windows
+/// (tokio's own `creation_flags`, available on Windows builds only).
+fn base_command(exe: &Path) -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(exe);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
+fn is_retryable_spawn_error(code: Option<i32>) -> bool {
+    matches!(code, Some(c) if RETRYABLE_SPAWN_ERRORS.contains(&c))
+}
+
+/// Format a `SevenZipFailed` whose message is actually actionable in the GUI:
+/// executable path, exit code, stderr tail (≤ 1000 chars) and a remedy hint.
+fn sevenzip_failure(exe: &Path, code: i32, text: &str) -> UpError {
+    let detail = tail_chars(&tail_text(text), ERROR_TAIL_LIMIT);
+    let mut message = format!("7-Zip 执行失败（{}，退出码 {code}）", exe.display());
+    if !detail.is_empty() {
+        message.push_str("：");
+        message.push_str(&detail);
+    }
+    message.push_str("。可设置 UNPARANOIA_7Z 指向已安装的 7-Zip（7zz / 7z.exe）。");
+    UpError::SevenZipFailed { code, message }
+}
+
+fn spawn_failure(exe: &Path, err: &std::io::Error) -> UpError {
+    UpError::SevenZipFailed {
+        code: -1,
+        message: format!(
+            "无法启动 7-Zip（{}）：{err}。可设置 UNPARANOIA_7Z 指向已安装的 7-Zip（7zz / 7z.exe）。",
+            exe.display()
+        ),
+    }
+}
+
+/// Keep at most `limit` characters from the END of `text` (the tail is what
+/// explains a 7-Zip failure). A truncated result is prefixed with an ellipsis
+/// and is still exactly `limit` characters long.
+fn tail_chars(text: &str, limit: usize) -> String {
+    let text = text.trim();
+    let count = text.chars().count();
+    if count <= limit {
+        return text.to_string();
+    }
+    let keep = limit.saturating_sub(1);
+    let tail: String = text.chars().skip(count - keep).collect();
+    format!("…{tail}")
 }
 
 fn collect_kv(block: &str, out: &mut BTreeMap<String, String>) {
@@ -734,7 +825,9 @@ pub fn parse_slt(text: &str) -> ListResult {
         .unwrap_or(0);
 
     for kv in split_entry_blocks(entry_part) {
-        let Some(raw_path) = kv.get("Path") else { continue };
+        let Some(raw_path) = kv.get("Path") else {
+            continue;
+        };
         let path = raw_path.replace('\\', "/");
         result.entries.push(ListEntry {
             path,
@@ -810,7 +903,10 @@ mod tests {
         assert_eq!(r.offset, 4242);
         assert_eq!(r.entries.len(), 3, "entries = {:?}", r.entries);
         assert_eq!(r.file_count(), 2);
-        assert_eq!(r.top_level(true), vec!["pkg".to_string(), "top2.txt".to_string()]);
+        assert_eq!(
+            r.top_level(true),
+            vec!["pkg".to_string(), "top2.txt".to_string()]
+        );
         assert_eq!(r.total_uncompressed(), 8);
         assert_eq!(r.smallest_encrypted().unwrap().path, "pkg/a.txt");
     }
@@ -838,10 +934,69 @@ mod tests {
     }
 
     #[test]
+    fn retryable_spawn_errors_are_windows_lock_codes() {
+        assert!(is_retryable_spawn_error(Some(5)));
+        assert!(is_retryable_spawn_error(Some(32)));
+        assert!(is_retryable_spawn_error(Some(225)));
+        assert!(!is_retryable_spawn_error(Some(2)));
+        assert!(!is_retryable_spawn_error(None));
+    }
+
+    #[test]
+    fn failure_messages_are_actionable_and_bounded() {
+        let exe = PathBuf::from("/opt/paranoia/binaries/mac/7zz");
+        let err = sevenzip_failure(&exe, 2, "ERROR: x\nERROR: y\n");
+        assert!(matches!(err, UpError::SevenZipFailed { code: 2, .. }));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("/opt/paranoia/binaries/mac/7zz"),
+            "message: {msg}"
+        );
+        assert!(msg.contains("退出码 2"), "message: {msg}");
+        assert!(msg.contains("UNPARANOIA_7Z"), "message: {msg}");
+
+        // A huge stderr tail is truncated from the front, keeping the end.
+        let long = format!("PREFIX {} SUFFIX", "x".repeat(5000));
+        let msg = sevenzip_failure(&exe, 2, &long).to_string();
+        assert!(msg.contains("SUFFIX"), "tail must be kept: {msg}");
+        assert!(!msg.contains("PREFIX"), "head must be dropped: {msg}");
+        assert!(
+            msg.chars().count() < 1200,
+            "message too long: {} chars",
+            msg.chars().count()
+        );
+
+        // Spawn failures still name the executable and the remedy.
+        let io_err = std::io::Error::from_raw_os_error(2);
+        let msg = spawn_failure(&exe, &io_err).to_string();
+        assert!(
+            msg.contains("/opt/paranoia/binaries/mac/7zz"),
+            "message: {msg}"
+        );
+        assert!(msg.contains("UNPARANOIA_7Z"), "message: {msg}");
+    }
+
+    #[test]
     fn junk_is_ignored_for_top_level() {
         let mut r = ListResult::default();
-        r.entries.push(ListEntry { path: "__MACOSX/._x".into(), raw_path: String::new(), is_dir: false, size: 1, packed: 1, encrypted: false, method: String::new() });
-        r.entries.push(ListEntry { path: "root/a.txt".into(), raw_path: String::new(), is_dir: false, size: 2, packed: 2, encrypted: false, method: String::new() });
+        r.entries.push(ListEntry {
+            path: "__MACOSX/._x".into(),
+            raw_path: String::new(),
+            is_dir: false,
+            size: 1,
+            packed: 1,
+            encrypted: false,
+            method: String::new(),
+        });
+        r.entries.push(ListEntry {
+            path: "root/a.txt".into(),
+            raw_path: String::new(),
+            is_dir: false,
+            size: 2,
+            packed: 2,
+            encrypted: false,
+            method: String::new(),
+        });
         assert_eq!(r.top_level(false).len(), 2);
         assert_eq!(r.top_level(true), vec!["root".to_string()]);
     }

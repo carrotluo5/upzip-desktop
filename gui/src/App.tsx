@@ -60,6 +60,7 @@ interface TaskOutcome {
   passwords_tried: number;
   elapsed_ms: number;
   warnings?: string[];
+  related_paths?: string[];
 }
 
 interface Summary {
@@ -100,6 +101,7 @@ interface Settings {
   recursive: boolean;
   minFreeRatio: number;
   theme: ThemeMode;
+  settingsVersion?: number;
 }
 
 interface AppInfo {
@@ -109,7 +111,26 @@ interface AppInfo {
   settingsPath: string;
   sevenZip: string | null;
   sevenZipVersion: string | null;
+  logPath?: string | null;
+  logDir?: string | null;
   stagingPrefix: string;
+}
+
+interface Diagnostics {
+  version?: string;
+  os?: string;
+  arch?: string;
+  configDir?: string;
+  settingsPath?: string;
+  sevenZip?: string | null;
+  sevenZipVersion?: string | null;
+  logPath?: string | null;
+  logDir?: string | null;
+  processedPath?: string | null;
+  processedCount?: number;
+  passwordCount?: number;
+  stagingPrefix?: string;
+  settingsJson?: string;
 }
 
 interface BatchState {
@@ -132,7 +153,7 @@ const DEFAULT_SETTINGS: Settings = {
   jobs: 2,
   conflict: "rename",
   layout: "smart",
-  skipProcessed: true,
+  skipProcessed: false,
   forceDocuments: false,
   keepBroken: false,
   stripJunk: true,
@@ -144,6 +165,7 @@ const DEFAULT_SETTINGS: Settings = {
   recursive: true,
   minFreeRatio: 1.1,
   theme: "system",
+  settingsVersion: 2,
 };
 
 const BACKSLASH = String.fromCharCode(92);
@@ -431,6 +453,7 @@ export default function App() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [live, setLive] = useState<LiveCounts>({ ...EMPTY_COUNTS });
   const [batchKeys, setBatchKeys] = useState<string[]>([]);
+  const [skipNotice, setSkipNotice] = useState<string[] | null>(null);
   const [activity, setActivity] = useState("");
   const [dragging, setDragging] = useState(false);
   const [tab, setTab] = useState<Tab>("queue");
@@ -439,6 +462,7 @@ export default function App() {
   const logBox = useRef<HTMLDivElement | null>(null);
   const idKey = useRef<Map<number, string>>(new Map());
   const tasksRef = useRef<Task[]>([]);
+  const batchKeysRef = useRef<string[]>([]);
 
   useEffect(() => {
     tasksRef.current = tasks;
@@ -452,6 +476,7 @@ export default function App() {
       const next = prev.concat("[" + stamp + "] " + line);
       return next.length > 2000 ? next.slice(next.length - 2000) : next;
     });
+    void invoke("append_log", { line }).catch(() => {});
   }, []);
 
   const patchByKey = useCallback((key: string, patch: Partial<Task>) => {
@@ -668,6 +693,8 @@ export default function App() {
       setSummary(null);
       setLive({ ...EMPTY_COUNTS });
       setBatchKeys(files);
+      batchKeysRef.current = files;
+      setSkipNotice(null);
       setActivity("");
       setRunning(true);
       setPaused(false);
@@ -827,6 +854,8 @@ export default function App() {
     setSummary(null);
     setLive({ ...EMPTY_COUNTS });
     setBatchKeys([]);
+    batchKeysRef.current = [];
+    setSkipNotice(null);
     setActivity("");
     pushLog("已清空任务列表");
   }, [tasks, running, pushLog]);
@@ -888,6 +917,27 @@ export default function App() {
       setToast("复制失败: " + errText(error));
     }
   }, [logs]);
+
+  const revealLogDir = useCallback(async () => {
+    let dir: string | null = null;
+    if (info) {
+      if (info.logDir) {
+        dir = info.logDir;
+      } else if (info.configDir) {
+        const sep = info.configDir.includes(BACKSLASH) ? BACKSLASH : "/";
+        dir = info.configDir.replace(/[\\/]+$/, "") + sep + "logs";
+      }
+    }
+    if (!dir) {
+      setToast("日志目录未知（后端尚未提供 logDir）");
+      return;
+    }
+    try {
+      await invoke("reveal_path", { path: dir });
+    } catch (error) {
+      setToast("打开日志目录失败: " + errText(error));
+    }
+  }, [info]);
 
   const pickInput = useCallback(
     async (mode: "files" | "folder") => {
@@ -1081,6 +1131,22 @@ export default function App() {
             };
             if (outcome.detection) patch.detection = outcome.detection;
             patchById(ev.id, patch);
+            const related = outcome.related_paths ?? [];
+            if (related.length > 0) {
+              const mergedReason = "已并入 " + basename(outcome.path) + "（分卷）";
+              const relatedPatch: Partial<Task> = {
+                phase: "done",
+                status: outcome.status,
+                percent: outcome.status === "success" || outcome.status === "skipped" ? 100 : null,
+                reason: mergedReason,
+              };
+              const knownKeys = new Set(tasksRef.current.map((t) => t.key));
+              for (const rel of related) {
+                if (!rel || rel === outcome.path) continue;
+                if (!knownKeys.has(rel)) continue;
+                patchByKey(rel, relatedPatch);
+              }
+            }
             if (outcome.status === "failed" || outcome.status === "needs_password") {
               pushLog(basename(outcome.path) + " " + statusLabel(outcome.status) + "：" + (outcome.reason ?? "无详情"));
             }
@@ -1102,10 +1168,37 @@ export default function App() {
 
       const unlistenDone = await listen<Summary>("unparanoia://done", (event) => {
         const done = event.payload;
+        const batch = batchKeysRef.current;
+        // 正常情况用本批 keys；若应用在批次运行中重启（batchKeys 丢失），退化为
+        // 当前仍在排队/运行的行，避免这些行永远停在「待处理」。
+        const settleKeys =
+          batch.length > 0
+            ? batch
+            : tasksRef.current
+                .filter((t) => t.phase === "queued" || t.phase === "running")
+                .map((t) => t.key);
         setSummary(done);
         setRunning(false);
         setPaused(false);
         setActivity("");
+        // 仅在正常跑完（无失败/取消）时收尾；取消或 stopOnError 中止时保留未开始
+        // 的行，方便用户直接重试，避免被误标为「分卷跳过」。
+        const normalDone = done.cancelled === 0 && done.failed === 0;
+        if (normalDone && settleKeys.length > 0) {
+          const keys = new Set(settleKeys);
+          setTasks((prev) =>
+            prev.map((t): Task => {
+              if (!keys.has(t.key) || (t.phase !== "queued" && t.phase !== "running")) return t;
+              return {
+                ...t,
+                phase: "done",
+                status: "skipped",
+                percent: 100,
+                reason: "未处理：同一分卷任务已由首卷处理",
+              };
+            }),
+          );
+        }
         pushLog(
           "批次完成：成功 " +
             done.success +
@@ -1123,6 +1216,14 @@ export default function App() {
             (done.elapsed_ms / 1000).toFixed(1) +
             " 秒",
         );
+        if (normalDone && done.success === 0 && done.skipped > 0 && done.needs_password === 0) {
+          const message = "文件因历史处理记录被跳过：可点「重新解压」，或在设置中清除处理记录";
+          pushLog(message);
+          setToast(message);
+          setSkipNotice(settleKeys.length > 0 ? settleKeys : null);
+        } else {
+          setSkipNotice(null);
+        }
         void refreshInfo();
       });
       if (disposed) {
@@ -1358,6 +1459,32 @@ export default function App() {
             </div>
           </section>
 
+          {skipNotice && (
+            <div className="skipnotice">
+              <span>
+                文件因历史处理记录被跳过：可点「重新解压」，或在设置中清除处理记录。
+              </span>
+              <span className="spacer" />
+              <button
+                className="mini"
+                onClick={() => {
+                  void forgetProcessed();
+                  setSkipNotice(null);
+                }}
+                disabled={running}
+              >
+                清除处理记录
+              </button>
+              <button
+                className="mini primary"
+                onClick={() => void startPaths(skipNotice, { skipProcessed: false })}
+                disabled={running}
+              >
+                全部重新解压
+              </button>
+            </div>
+          )}
+
           <section className="panel grow">
             <div className="toolbar">
               <button className="primary" onClick={start} disabled={running || queuedTasks.length === 0}>
@@ -1489,6 +1616,13 @@ export default function App() {
                 <button className="mini" onClick={() => setLogs([])} disabled={logs.length === 0}>
                   清空
                 </button>
+                <button
+                  className="mini"
+                  onClick={() => void revealLogDir()}
+                  disabled={!info || (!info.logDir && !info.configDir)}
+                >
+                  打开日志目录
+                </button>
               </div>
             </div>
             <div className="logbox grow" ref={logBox}>
@@ -1589,6 +1723,7 @@ export default function App() {
             onThemeChange={changeTheme}
             onCleanupStaging={cleanupStaging}
             onForgetProcessed={forgetProcessed}
+            onOpenLogDir={revealLogDir}
             notify={setToast}
             pushLog={pushLog}
           />
@@ -1748,6 +1883,7 @@ interface SettingsTabProps {
   onThemeChange: (theme: ThemeMode) => Promise<void>;
   onCleanupStaging: (outputRoot: string | null) => Promise<void>;
   onForgetProcessed: () => Promise<void>;
+  onOpenLogDir: () => Promise<void>;
   notify: (message: string) => void;
   pushLog: (line: string) => void;
 }
@@ -1760,6 +1896,7 @@ function SettingsTab({
   onThemeChange,
   onCleanupStaging,
   onForgetProcessed,
+  onOpenLogDir,
   notify,
   pushLog,
 }: SettingsTabProps) {
@@ -1768,6 +1905,9 @@ function SettingsTab({
   const [licenseText, setLicenseText] = useState<string | null>(null);
   const [licenseLoading, setLicenseLoading] = useState(false);
   const [licenseError, setLicenseError] = useState<string | null>(null);
+  const [diag, setDiag] = useState<Diagnostics | null>(null);
+  const [diagLoading, setDiagLoading] = useState(false);
+  const [diagError, setDiagError] = useState<string | null>(null);
 
   useEffect(() => {
     setDraft(settings);
@@ -1781,6 +1921,27 @@ function SettingsTab({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [licenseOpen]);
+
+  useEffect(() => {
+    let disposed = false;
+    setDiagLoading(true);
+    void (async () => {
+      try {
+        const data = await invoke<Diagnostics>("diagnostics");
+        if (!disposed) {
+          setDiag(data ?? null);
+          setDiagError(null);
+        }
+      } catch (error) {
+        if (!disposed) setDiagError("诊断命令不可用: " + errText(error));
+      } finally {
+        if (!disposed) setDiagLoading(false);
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, []);
 
   async function openLicense() {
     setLicenseOpen(true);
@@ -1801,6 +1962,38 @@ function SettingsTab({
 
   function closeLicense() {
     setLicenseOpen(false);
+  }
+
+  function localDiagnostics(): Diagnostics {
+    return {
+      version: info?.version,
+      configDir: info?.configDir,
+      settingsPath: info?.settingsPath,
+      sevenZip: info?.sevenZip ?? null,
+      sevenZipVersion: info?.sevenZipVersion ?? null,
+      logPath: info?.logPath ?? null,
+      logDir: info?.logDir ?? null,
+      stagingPrefix: info?.stagingPrefix,
+      settingsJson: JSON.stringify(draft, null, 2),
+    };
+  }
+
+  async function copyDiagnostics() {
+    let payload: Diagnostics | null = diag;
+    try {
+      payload = await invoke<Diagnostics>("diagnostics");
+      setDiag(payload);
+      setDiagError(null);
+    } catch (error) {
+      pushLog("diagnostics 命令不可用，改用前端本地信息: " + errText(error));
+      payload = payload ?? localDiagnostics();
+    }
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(payload ?? {}, null, 2));
+      notify("诊断信息已复制到剪贴板");
+    } catch (error) {
+      notify("复制诊断信息失败: " + errText(error));
+    }
   }
 
   function patch<K extends keyof Settings>(key: K, value: Settings[K]) {
@@ -1958,7 +2151,7 @@ function SettingsTab({
                 checked={draft.skipProcessed}
                 onChange={(event) => patch("skipProcessed", event.target.checked)}
               />
-              跳过已成功解压过的文件（记录在 processed.json）
+              跳过已成功处理过的文件（默认关闭；开启后按 processed.json 指纹跳过）
             </label>
             <label className="check">
               <input
@@ -2032,6 +2225,52 @@ function SettingsTab({
           <div className="muted small">
             清理临时残留：删除输出根目录（未设置时为系统临时目录）下的 .unparanoia-tmp-* 残留；清除处理记录：删除
             processed.json，之后再次解压不会跳过已成功项。
+          </div>
+        </section>
+
+        <section className="section">
+          <h4>诊断信息</h4>
+          <div className="techinfo">
+            <div>
+              <b>版本</b>：{diag?.version ?? (info ? info.version : "—")}
+            </div>
+            <div>
+              <b>系统</b>：
+              {diag && (diag.os || diag.arch) ? (diag.os ?? "?") + " / " + (diag.arch ?? "?") : "—"}
+            </div>
+            <div>
+              <b>7-Zip</b>：{diag?.sevenZipVersion ?? (info ? info.sevenZipVersion ?? "未找到" : "—")}
+              {diag?.sevenZip ?? info?.sevenZip ? (
+                <span className="mono muted"> ({diag?.sevenZip ?? info?.sevenZip})</span>
+              ) : null}
+            </div>
+            <div>
+              <b>配置目录</b>：<span className="mono">{diag?.configDir ?? (info ? info.configDir : "—")}</span>
+            </div>
+            <div>
+              <b>日志路径</b>：<span className="mono">{diag?.logPath ?? info?.logPath ?? "—"}</span>
+            </div>
+            {diag?.processedCount != null ? (
+              <div>
+                <b>处理记录</b>：{diag.processedCount} 条
+                {diag.processedPath ? <span className="mono muted"> ({diag.processedPath})</span> : null}
+              </div>
+            ) : null}
+            {diag?.passwordCount != null ? (
+              <div>
+                <b>密码库</b>：{diag.passwordCount} 条（明文）
+              </div>
+            ) : null}
+            {diagLoading ? <div className="muted small">正在读取诊断信息…</div> : null}
+            {diagError ? <div className="bad small">{diagError}</div> : null}
+            <div className="muted small">
+              日志文件用于排查解压问题；如遇失败，可复制诊断信息或打开日志目录后附上 unparanoia.log。
+            </div>
+          </div>
+          <div className="buttons">
+            <button onClick={() => void copyDiagnostics()}>复制诊断信息</button>
+            <button onClick={() => void onOpenLogDir()}>打开日志目录</button>
+            <button onClick={() => void onForgetProcessed()}>清除处理记录</button>
           </div>
         </section>
 

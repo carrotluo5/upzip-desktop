@@ -19,11 +19,7 @@ pub type Sink = Arc<dyn Fn(TaskEvent) + Send + Sync>;
 /// Expand files/folders into a deduplicated, sorted file list. `exclude` is a
 /// directory skipped during recursion (the run's output root) so a second run
 /// does not walk over what the first one extracted.
-pub fn expand_inputs(
-    inputs: &[PathBuf],
-    recursive: bool,
-    exclude: Option<&Path>,
-) -> Vec<PathBuf> {
+pub fn expand_inputs(inputs: &[PathBuf], recursive: bool, exclude: Option<&Path>) -> Vec<PathBuf> {
     let excluded = exclude.and_then(|e| fs::canonicalize(e).ok());
     let mut out: Vec<PathBuf> = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
@@ -99,7 +95,8 @@ fn is_fatal(status: Option<TaskStatus>) -> bool {
 ///   are already running finish naturally.
 /// * A panicking task must never take the batch down: the join error is turned
 ///   into a Failed outcome (and counts towards `stop_on_error`).
-/// * The processed-fingerprint store is flushed once the batch ends.
+/// * The processed-fingerprint store is flushed once the batch ends, but only
+///   when `skip_processed` is enabled (with it off nothing is ever recorded).
 pub async fn run_batch(
     engine: Arc<Engine>,
     files: Vec<PathBuf>,
@@ -212,8 +209,11 @@ pub async fn run_batch(
         }
     }
 
-    // Flush the processed fingerprints once per batch.
-    engine.save_processed().await;
+    // Flush the processed fingerprints once per batch. With skip_processed off
+    // (the default) nothing was recorded, so do not create processed.json at all.
+    if engine.cfg.skip_processed {
+        engine.save_processed().await;
+    }
 
     let mut summary = Summary::default();
     for o in &outcomes {
@@ -241,8 +241,8 @@ mod tests {
 
     #[tokio::test]
     async fn stop_on_error_marks_remaining_cancelled() {
-        let dir = std::env::temp_dir()
-            .join(format!("paranoia-queue-{}", uuid::Uuid::new_v4().simple()));
+        let dir =
+            std::env::temp_dir().join(format!("paranoia-queue-{}", uuid::Uuid::new_v4().simple()));
         fs::create_dir_all(&dir).unwrap();
         let sz = SevenZip::new(PathBuf::from("/definitely/not/7z-exe"));
         let mut cfg = RunConfig::default();
@@ -255,11 +255,7 @@ mod tests {
         let engine = Arc::new(Engine::new(sz, cfg));
         // Nonexistent inputs fail at the detect step (metadata error), which is
         // enough to exercise the stop-on-error path without a 7-Zip binary.
-        let files = vec![
-            dir.join("a.enc"),
-            dir.join("b.enc"),
-            dir.join("c.enc"),
-        ];
+        let files = vec![dir.join("a.enc"), dir.join("b.enc"), dir.join("c.enc")];
         let sink: Sink = Arc::new(|_: TaskEvent| {});
         let summary = run_batch(
             engine,
@@ -273,6 +269,49 @@ mod tests {
         assert_eq!(summary.failed, 1);
         assert_eq!(summary.cancelled, 2);
         assert_eq!(summary.success, 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The processed store is only flushed when `skip_processed` is enabled: a
+    /// default run must never create processed.json.
+    #[tokio::test]
+    async fn processed_file_is_only_saved_when_skip_is_enabled() {
+        let dir = std::env::temp_dir().join(format!(
+            "unparanoia-queue-processed-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let files = vec![dir.join("a.enc")];
+
+        for (skip, expect_file) in [(false, false), (true, true)] {
+            let tag = if skip { "skip" } else { "noskip" };
+            let processed_path = dir.join(format!("{tag}.json"));
+            let mut cfg = RunConfig::default();
+            cfg.jobs = 1;
+            cfg.nested = false;
+            cfg.skip_processed = skip;
+            cfg.output_root = Some(dir.join(format!("out-{tag}")));
+            cfg.processed_path = Some(processed_path.clone());
+            let engine = Arc::new(Engine::new(
+                SevenZip::new(PathBuf::from("/definitely/not/7z-exe")),
+                cfg,
+            ));
+            let sink: Sink = Arc::new(|_: TaskEvent| {});
+            let _ = run_batch(
+                engine,
+                files.clone(),
+                CancelToken::new(),
+                Arc::new(PauseGate::new()),
+                sink,
+            )
+            .await;
+            assert_eq!(
+                processed_path.exists(),
+                expect_file,
+                "skip_processed={skip} must {} processed.json",
+                if expect_file { "write" } else { "not write" }
+            );
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 }

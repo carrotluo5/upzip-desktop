@@ -1,8 +1,8 @@
-# 合并映射：upzip → Unparanoia（v0.2.0 合并 + v0.3.0/v0.3.1 增量）
+# 合并映射：upzip → Unparanoia（v0.2.0 合并 + v0.3.0/v0.3.1/v0.3.2 增量）
 
 > 本文记录 **upzip**（批量解压伪装压缩包，Tauri 2 + Rust）如何合并进
 > **unparanoia**（Paranoia File Encryption v4 `.enc` 解密器），以及 v0.3.0 更名
-> **Unparanoia（帕罗诺亚解包器）**、v0.3.1 增量后的变化。upzip 源码位于
+> **Unparanoia（帕罗诺亚解包器）**、v0.3.1/v0.3.2 增量后的变化。upzip 源码位于
 > /Volumes/Carrot/AppPorts/hermes/upzip，这里只记录迁移决策；代码本体已进入
 > crates/unpack-core、crates/cli、gui/。
 >
@@ -116,4 +116,14 @@ v0.3.0 的用户需求是「独立密码管理页、多密码明文保存」，�
 | 便携包不再带 sidecar | `scripts/build-windows-portable.sh`/`build-windows.ps1`/CI | 输出 `Unparanoia.exe` + `unparanoia-cli.exe` + 许可证/README/SHA256SUMS（单 exe 可独立运行）；不再复制 7z.exe/7z.dll |
 | 测试夹具与 e2e | `scripts/make-fixtures.sh`、`scripts/e2e-verify.sh` | 新增 `split.7z.001..004`、`split.7z.001.enc..`、`truncated.7z.001.enc`；e2e 增加普通分卷/加密分卷组/只给非首卷/缺卷 + `--licenses` 用例（91 项） |
 | 版本与产物命名 | Cargo.toml / gui/package.json / tauri.conf.json / docs | 0.3.1；`Unparanoia_0.3.1_aarch64.dmg`、`Unparanoia-0.3.1-win-x64-portable.zip`；最终哈希见 VERIFICATION.md §7 |
+## 7. v0.3.2 增量（跳过默认关闭 / Windows 体验 / 日志诊断）
+
+| 需求 | 实现位置 | 说明 |
+|---|---|---|
+| 跳过已处理默认关闭 | `crates/unpack-core/src/types.rs`（`RunConfig::default`）+ `settings.rs`（`settingsVersion` 迁移）+ `crates/cli/src/main.rs`（`--skip-processed`） | v0.3.1 默认开启导致真实用户的分卷输入被静默跳过；v0.3.2 默认不跳过、不写 `processed.json`，旧 `settings.json` 一次性迁移为关闭；CLI 改为 `--skip-processed` opt-in（旧 `--no-skip-processed` 兼容 no-op） |
+| 分卷队列行归并 | `crates/unpack-core/src/types.rs`（`TaskOutcome.related_paths`）+ `engine.rs` + `gui/src/App.tsx` | 同族卷在 GUI 队列归并为一行；全跳过批次显示提示条（清除处理记录/全部重新解压） |
+| Windows 无控制台闪窗 + 错误细节 | `crates/unpack-core/src/sevenzip.rs` | Windows `CREATE_NO_WINDOW`；失败信息含 7z 路径/退出码/stderr 尾部（≤1000 字符）；spawn 锁文件错误 5/32/225 重试 3 次 |
+| 日志落盘 + 诊断 | `gui/src-tauri/src/lib.rs`（`unparanoia.log`、`append_log`、`diagnostics`）+ `gui/src/App.tsx` | 日志 `<configDir>/logs/unparanoia.log`（>2 MiB 轮转）；设置页「诊断信息」（复制诊断 JSON/打开日志目录/清除处理记录） |
+| 测试与产物 | `scripts/e2e-verify.sh` + docs | e2e 91→104（新增默认不跳过/--skip-processed/related_paths/清除记录后重跑）；测试 107→114（unpack-core 65 + GUI lib 2）；产物 `Unparanoia_0.3.2_aarch64.dmg` / `Unparanoia-0.3.2-win-x64-portable.zip`，哈希见 VERIFICATION.md §7 |
+
 

@@ -424,3 +424,127 @@ Lead：crates/core/**、crates/embedded-7z/**、根 Cargo.toml/Cargo.lock、最�
 engine-dev：crates/unpack-core/**。app-reader：gui/src-tauri/**。core-reader：crates/cli/**。
 docs-reader：docs/**（除 DEV-CONTRACT）、README.md、scripts/**、.github/**、binaries/README.md、NOTICE。
 gui-frontend：仅在收到 Lead 通知后改 gui/src/**（许可证查看入口/分卷提示可选）。
+
+---
+
+## 9. v0.3.2 增补：跳过记录、分卷行归并、Windows 控制台窗口与诊断日志
+
+### 9.0 背景与根因（Lead 已定位）
+
+- 用户 m01610 反馈：把 3138.7z.001.enc + 3138.7z.002.enc 拖入 macOS GUI，进度条停在 50%、
+  无输出，日志显示「成功 0 / 跳过 1」。根因 = `crates/unpack-core/src/engine.rs` 的
+  processed 指纹跳过：engine-dev 调试真实样本时用**默认配置目录**跑 CLI，把两条 `/tmp/...`
+  调试路径的成功记录写进用户真实的 `~/Library/Application Support/unparanoia/processed.json`
+  （fingerprint `8b6d68e7...` 正是 3138.7z.001.enc）。v0.3.1 的 `skip_processed` 默认 true，
+  因此真实文件被静默跳过；分卷族只产生 1 个任务，所以只有 001 行被标记、002 行留在「待处理」，
+  进度按 2 个文件算停在 50%。
+- 教训：默认开启「按指纹跳过」对用户不可见且易被污染；分卷族的多行状态必须一起收尾。
+- Windows 端「不时弹出空白命令行窗口」根因：`crates/unpack-core/src/sevenzip.rs` 的 `run()`
+  用 `Command::new(7z)` 启动控制台程序，Windows GUI 子系统下没有 `CREATE_NO_WINDOW` 标志，
+  每次调用 7z（探测/密码校验/解压/版本）都会闪一个控制台窗口。
+
+### 9.1 引擎（owner：engine-dev，作用域 `crates/unpack-core/**`）
+
+1. `types.rs` `TaskOutcome` 新增 `pub related_paths: Vec<PathBuf>`（默认空；`TaskOutcome` 没有
+   `rename_all`，序列化键就是 `related_paths`，前端按 snake_case 读取）。
+2. `engine.rs::process_file`：`let split_family = split::discover(path);` 之后立即
+   `out.related_paths = family.volumes.iter().map(|v| v.path.clone()).collect();`（含
+   `missing_first()` 的 bail 分支；即 skipped/failed/success 都带全族卷路径，顺序按卷号）。
+   非分卷任务保持空数组。
+3. `types.rs` `RunConfig::default().skip_processed` 改为 `false`。
+4. `settings.rs`：
+   - `Settings` 新增 `pub settings_version: u32`（camelCase `settingsVersion`，`#[serde(default)]`
+     → 旧文件缺字段得 0），`Default` 实现里 = 2，`save` 原样写 2。
+   - `load_from` 反序列化后迁移：`if settings_version < 2 { skip_processed = false; settings_version = 2; }`。
+     新增测试：旧 JSON `{"skipProcessed":true}` → false 且 version=2；新 JSON
+     `{"settingsVersion":2,"skipProcessed":true}` → 保持 true；默认 skip_processed=false；
+     `serde` camelCase 往返含 `settingsVersion`。
+5. `engine.rs` 跳过文案改为：
+   `已处理过（历史记录跳过）：如需重新解压请点「重新解压」或在设置中关闭「跳过已处理」`
+   （保留「已处理过」前缀，便于 e2e/文档断言）。
+6. `sevenzip.rs`：
+   - Windows：`run()` 与 `version()` 构造 `Command` 后设置
+     `creation_flags(0x08000000 /* CREATE_NO_WINDOW */)`（`#[cfg(windows)] use
+     std::os::windows::process::CommandExt`），确保 GUI 不闪控制台窗口。
+   - Windows spawn 失败且 `raw_os_error()` 为 5/32/225（拒绝访问/占用）时重试最多 3 次、
+     间隔 150ms（`tokio::time::sleep`），仍失败才报 `UpError::SevenZipFailed`。
+   - `SevenZipFailed` 的 message 必须包含：7z 可执行文件路径、OS 错误/退出码、stderr 末尾
+     ≤1000 字符；附建议「可设置 UNPARANOIA_7Z 指向已安装 7-Zip」。检查现有 `SevenZipFailed`
+     构造点，保证 GUI 的 `reason` 能看到这些信息。
+7. processed 记录 gate（默认关闭时不留记录）：成功路径仅当 `cfg.skip_processed == true` 时
+   才 `processed.insert`；`queue.rs` 在 `run_batch` 末尾仅当引擎 `cfg.skip_processed` 时
+   `save_processed()`。测试：默认配置跑完 processed 记录为空；开启后写入并可被跳过。
+8. 测试：更新 `settings`/`engine` 相关断言；新增 `related_paths` 断言（分卷族成功/缺首卷）；
+   `cargo test -p unparanoia-unpack-core` 全绿、`cargo check -p unparanoia-unpack-core --all-targets`
+   0 warning。
+
+### 9.2 GUI 后端（owner：app-reader，作用域 `gui/src-tauri/**`）
+
+1. `AppInfo` 新增 `logPath: String`、`logDir: String`（camelCase，`<configDir>/logs/`）。
+2. 持久化日志：启动时 `create_dir_all(configDir/logs)`，追加写 `unparanoia.log`（>2MiB 时
+   轮转为 `unparanoia.log.1`，只保留 1 份）。记录：启动信息、7-Zip 解析结果与来源、
+   `start_batch` 参数摘要（**绝不写密码**）、每个 TaskEvent 的关键行、错误/panic、批次 summary。
+3. 新增 `#[tauri::command] append_log(line: String) -> Result<(), String>`：前端 `pushLog` 调用，
+   追加「时间戳 + line」。新增 `#[tauri::command] diagnostics() -> Diagnostics`（camelCase）：
+   version、os/arch、configDir、settingsPath、sevenZip、sevenZipVersion、logPath、logDir、
+   processedPath、processedCount、passwordCount（只给数量）、stagingPrefix、settingsJson；
+   同时把诊断写一行日志。注册后命令总数 24。
+4. `setup` 里 `Settings::load()` 之后尽力 `settings.save()`（把 v2 迁移持久化）；失败仅 stderr。
+5. 事件名/事件结构/其余命令不变。`cargo check -p unparanoia --features custom-protocol --all-targets`
+   0 warning。
+
+### 9.3 前端（owner：gui-frontend，作用域 `gui/src/**`、`gui/index.html`）
+
+1. 类型：`TaskEvent` 的 `task_finished.outcome` 增加 `related_paths: string[]`；`AppInfo` 增加
+   `logPath`/`logDir`（后端未就绪时可选，做空值兜底）；`Settings` 增加 `settingsVersion?: number`。
+2. `DEFAULT_SETTINGS.skipProcessed = false`；设置页该项文案改为
+   「跳过已成功处理过的文件（默认关闭；开启后按 processed.json 指纹跳过）」，并保留「清除处理记录」。
+3. `task_finished`：先按现有逻辑 patch 主行；再遍历 `outcome.related_paths` 中
+   `!= outcome.path` 的路径，**仅当队列里已有该 key 的行**时 `patchByKey`：
+   `phase:"done"`、`status` 同主行、`percent: 100`（success/skipped）、
+   `reason: "已并入 " + basename(outcome.path) + "（分卷）"`；不得新建未知行。
+4. `unparanoia://done`：对仍在 `queued`/`running` 且 key 属于本次 `batchKeys` 的行，置
+   `phase:"done"`、`status:"skipped"`、`reason:"未处理：同一分卷任务已由首卷处理"`。
+   若 `summary.success===0 && summary.skipped>0 && needs_password===0 && failed===0`：
+   toast + 日志提示「文件因历史处理记录被跳过：可点「重新解压」，或在设置中清除处理记录」，
+   并在队列顶部显示一条提示条，含按钮「清除处理记录」与「全部重新解压」
+   （后者 `startPaths(全部 batchKeys, {skipProcessed:false})`）。
+5. 日志页「复制/清空」旁新增「打开日志目录」→ `invoke("reveal_path",{path: info.logDir})`；
+   设置页新增「诊断信息」区块：显示版本、7-Zip 路径/版本、配置目录、日志路径，按钮
+   「复制诊断信息」（`invoke<Diagnostics>("diagnostics")` 后复制 JSON）、「打开日志目录」、
+   「清除处理记录」。`pushLog` 内同时 `invoke("append_log",{line}).catch(()=>{})`（fire-and-forget）。
+6. `pnpm --dir gui build` 通过；不使用 `any`/`innerHTML`/`dangerouslySetInnerHTML`；无新增运行时依赖。
+
+### 9.4 CLI（owner：core-reader，作用域 `crates/cli/**`）
+
+1. `RunFlags` 新增 `--skip-processed`（bool，opt-in）；保留 `--no-skip-processed`（hidden、
+   兼容旧脚本，等价默认行为，不再报错）。`apply_run_flags`: `if flags.skip_processed {
+   cfg.skip_processed = true; }`。
+2. 更新 `--help`/模块文档/`print_help` 文案：默认不跳过；`--skip-processed` 才启用指纹跳过。
+3. `run` 结束时只有在 `cfg.skip_processed` 时保存 processed（现有逻辑保持）；`doctor` 保留
+   processed.json 路径并可打印记录数（已有则确认）。
+4. `--json` 输出的 `outcome` 自动带 `related_paths`；无需特殊处理。
+5. `cargo fmt --check`、`cargo check -p unparanoia-cli --all-targets` 0 warning；legacy 模式行为不变。
+
+### 9.5 文档/脚本（owner：docs-reader，作用域 `docs/**`、`README.md`、`scripts/**`、`.github/**`；
+   被 9.1–9.4 阻塞，Lead 通知后再动）
+
+1. 版本 0.3.2；README「与 v0.3.1 的行为差异」增加：跳过已处理默认**关闭** + 首次升级会把旧的
+   `skipProcessed:true` 迁移为 false（只一次）；历史记录跳过的提示/重新解压/清除处理记录；
+   分卷族只产生一条任务、所有卷行统一标记；Windows 空白控制台窗口已修复（CREATE_NO_WINDOW）；
+   新增日志文件与诊断信息位置。
+2. `scripts/e2e-verify.sh` 增补：①默认（不带 `--skip-processed`）重复运行不跳过；
+   ②`--skip-processed` 第二次 Skipped 且 reason 含「已处理过」；③分卷任务 `--json` 的
+   outcome 含两个 `related_paths`；④清除 processed.json 后再跑成功。保持 91 项旧断言全过。
+3. `docs/OUTPUT-LAYOUT.md` skip_processed 段落改为默认关闭；`docs/VERIFICATION.md`/`docs/BUILD.md`/
+   `docs/WINDOWS_BUILD.md` 版本与日志/诊断/Windows 控制台修复说明，0.3.2 哈希位留「待 Lead 回填」。
+4. 不改 `docs/DEV-CONTRACT.md`。
+
+### 9.6 Lead
+
+- 版本 0.3.2：根 `Cargo.toml` `[workspace.package].version`、`gui/package.json`、`gui/src-tauri/tauri.conf.json`。
+- 清理用户真实配置目录里两条 `/tmp` 调试记录（`~/Library/Application Support/unparanoia/processed.json`）。
+- 依次：`cargo test --workspace`、`pnpm --dir gui build`、`./scripts/build.sh`、
+  `./scripts/build-windows-portable.sh`；真实样本手动复验（两卷一起 / 只给 .001 / 只给 .002）；
+  GUI 冒烟与截图；回填文档哈希；中文 git commit；桌面 `~/Desktop/Unparanoia-0.3.2/`。
+- 最终回复向用户索取 Windows 端日志（日志页 → 打开日志目录 → `unparanoia.log`）以定位 Windows 解压失败。

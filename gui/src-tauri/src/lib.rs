@@ -15,6 +15,8 @@
 //! The password store is kept in plain text by `unparanoia_core::config`
 //! (0600 on unix). Passwords are never logged.
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -31,12 +33,24 @@ use unparanoia_core::config::{
 };
 use unparanoia_unpack_core as unpack;
 use unparanoia_unpack_core::{
-    expand_inputs, run_batch, CancelToken, Detection, Engine, PauseGate, Settings, SevenZip, Sink,
-    Summary, TaskEvent, TMP_PREFIX,
+    expand_inputs, run_batch, CancelToken, Detection, Engine, PauseGate, ProcessedStore, Settings,
+    SevenZip, Sink, Summary, TaskEvent, TaskStatus, TMP_PREFIX,
 };
 
 pub const EVENT_TASK: &str = "unparanoia://event";
 pub const EVENT_DONE: &str = "unparanoia://done";
+
+/// Sub-directory of the configuration directory that holds the persistent log.
+const LOG_DIR_NAME: &str = "logs";
+/// Persistent GUI log file name; rotated to unparanoia.log.1 once it grows
+/// past LOG_MAX_BYTES.
+const LOG_FILE_NAME: &str = "unparanoia.log";
+/// Log rotation threshold (2 MiB); exactly one previous file is kept.
+const LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Serializes log writes/rotation between the UI thread, the batch worker and
+/// command handlers.
+static LOG_LOCK: Mutex<()> = Mutex::new(());
 
 /// Resolved bundled 7-Zip binary + its reported version (resolved once at
 /// startup; `None` when no binary could be found at all).
@@ -153,6 +167,197 @@ fn display_path(path: &std::path::Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+// ---------------------------------------------------------------- logging
+
+/// Directory that holds the persistent GUI log (<config dir>/logs).
+fn log_dir() -> PathBuf {
+    match config_dir() {
+        Ok(dir) => dir.join(LOG_DIR_NAME),
+        // A broken config dir must not disable logging entirely: fall back to
+        // the same temporary location the processed store uses.
+        Err(_) => std::env::temp_dir().join("unparanoia-logs"),
+    }
+}
+
+/// Full path of the current log file.
+fn log_file_path() -> PathBuf {
+    log_dir().join(LOG_FILE_NAME)
+}
+
+/// UTC timestamp with milliseconds, e.g. 2026-10-24T11:05:09.123Z.
+///
+/// Uses the civil-from-days algorithm instead of pulling in a local-time crate;
+/// the log is diagnostics output, so unambiguous UTC is enough.
+fn log_timestamp() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let seconds = now.as_secs() as i64;
+    let millis = now.subsec_millis();
+    let days = seconds.div_euclid(86_400);
+    let rem = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{millis:03}Z",
+        rem / 3_600,
+        (rem % 3_600) / 60,
+        rem % 60
+    )
+}
+
+/// Howard Hinnant's civil_from_days (days since 1970-01-01 -> Y-M-D).
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { year + 1 } else { year };
+    (year, month as u32, day as u32)
+}
+
+/// Rotate unparanoia.log -> unparanoia.log.1 when it exceeds the limit.
+fn rotate_log_if_needed(path: &std::path::Path) -> std::io::Result<()> {
+    let size = match std::fs::metadata(path) {
+        Ok(metadata) => metadata.len(),
+        Err(_) => return Ok(()), // missing file: nothing to rotate
+    };
+    if size <= LOG_MAX_BYTES {
+        return Ok(());
+    }
+    let rotated = path.with_extension("log.1");
+    let _ = std::fs::remove_file(&rotated);
+    std::fs::rename(path, &rotated)
+}
+
+/// Append one timestamped line to the persistent log. Creates the directory and
+/// rotates the file as needed. Errors bubble up so append_log can report them.
+fn try_append_log_line(line: &str) -> std::io::Result<()> {
+    let _guard = LOG_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let dir = log_dir();
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(LOG_FILE_NAME);
+    rotate_log_if_needed(&path)?;
+    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    writeln!(file, "{} {}", log_timestamp(), line)?;
+    Ok(())
+}
+
+/// Best-effort log write used outside command handlers: never fails the caller.
+fn append_log_line(line: &str) {
+    if let Err(error) = try_append_log_line(line) {
+        eprintln!("[unparanoia-gui] 写日志失败：{error}");
+    }
+}
+
+/// Shorten long engine text lines for the log file.
+fn shorten(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max_chars).collect();
+    out.push('…');
+    out
+}
+
+/// Human-readable name for a task status (log only).
+fn task_status_name(status: &TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Success => "success",
+        TaskStatus::Skipped => "skipped",
+        TaskStatus::NeedsPassword => "needs_password",
+        TaskStatus::Failed => "failed",
+        TaskStatus::Cancelled => "cancelled",
+    }
+}
+
+/// One log line per task event: the variant name plus its diagnostic fields.
+fn describe_task_event(event: &TaskEvent) -> String {
+    match event {
+        TaskEvent::TaskQueued { id, path, size } => {
+            format!("queued id={id} path={} size={size}", display_path(path))
+        }
+        TaskEvent::TaskStage { id, stage, detail } => match detail {
+            Some(detail) => format!(
+                "stage id={id} stage={stage} detail={}",
+                shorten(detail, 300)
+            ),
+            None => format!("stage id={id} stage={stage}"),
+        },
+        TaskEvent::TaskDetected { id, detection } => format!(
+            "detected id={id} container={} format={} entries={} encrypted={} notes={}",
+            detection.container,
+            detection.format.as_deref().unwrap_or("-"),
+            detection.total_entries,
+            detection.encrypted_entries,
+            detection.notes.len()
+        ),
+        TaskEvent::TaskProgress { id, percent, line } => {
+            let percent = percent
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            format!(
+                "progress id={id} percent={percent} line={}",
+                shorten(line, 400)
+            )
+        }
+        TaskEvent::TaskPasswordAttempt {
+            id,
+            source,
+            ok,
+            tried,
+        } => format!("password_attempt id={id} source={source} ok={ok} tried={tried}"),
+        TaskEvent::TaskPasswordMissing { id, tried } => {
+            format!("password_missing id={id} tried={tried}")
+        }
+        TaskEvent::TaskFinished { id, outcome } => {
+            let status = outcome
+                .status
+                .as_ref()
+                .map(task_status_name)
+                .unwrap_or("none");
+            format!(
+                "finished id={id} status={status} path={} dest={} files={} bytes={} elapsed_ms={} reason={} warnings={}",
+                display_path(&outcome.path),
+                outcome.dest.as_deref().map(display_path).unwrap_or_default(),
+                outcome.files,
+                outcome.bytes,
+                outcome.elapsed_ms,
+                outcome
+                    .reason
+                    .as_deref()
+                    .map(|reason| shorten(reason, 300))
+                    .unwrap_or_default(),
+                outcome.warnings.len()
+            )
+        }
+        TaskEvent::Log { line } => format!("log {}", shorten(line, 500)),
+    }
+}
+
+/// Where the resolved 7-Zip binary probably came from (log only).
+fn seven_zip_source(info: &SevenZipInfo) -> String {
+    for variable in ["UNPARANOIA_7Z", "UPZIP_7Z"] {
+        if let Some(value) = std::env::var_os(variable).filter(|value| !value.is_empty()) {
+            if PathBuf::from(value) == info.exe {
+                return format!("环境变量 {variable}");
+            }
+        }
+    }
+    let lowered = info.exe.to_string_lossy().to_ascii_lowercase();
+    if lowered.contains("embedded-7z") {
+        "内嵌（%LOCALAPPDATA%）".to_string()
+    } else {
+        "自动搜索/外部".to_string()
+    }
+}
+
 // ---------------------------------------------------------------- DTOs
 
 #[derive(Serialize)]
@@ -165,6 +370,29 @@ struct AppInfo {
     seven_zip: Option<String>,
     seven_zip_version: Option<String>,
     staging_prefix: String,
+    log_path: String,
+    log_dir: String,
+}
+
+/// Diagnostic snapshot used by the settings page and the bug-report flow.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Diagnostics {
+    version: String,
+    os: String,
+    arch: String,
+    config_dir: String,
+    settings_path: String,
+    seven_zip: String,
+    seven_zip_version: String,
+    log_path: String,
+    log_dir: String,
+    processed_path: String,
+    processed_count: usize,
+    /// Only the number of remembered passwords, never their values.
+    password_count: usize,
+    staging_prefix: String,
+    settings_json: String,
 }
 
 #[derive(Serialize)]
@@ -209,6 +437,8 @@ fn app_info(state: State<'_, AppState>) -> AppInfo {
         seven_zip,
         seven_zip_version,
         staging_prefix: TMP_PREFIX.to_string(),
+        log_path: display_path(&log_file_path()),
+        log_dir: display_path(&log_dir()),
     }
 }
 
@@ -257,6 +487,7 @@ fn start_batch(
     req: StartRequest,
 ) -> Result<(), String> {
     if req.files.is_empty() {
+        append_log_line("start_batch 失败：文件列表为空");
         return Err("文件列表为空，请先添加要处理的文件".into());
     }
     if state
@@ -264,9 +495,15 @@ fn start_batch(
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
+        append_log_line("start_batch 失败：已有任务正在运行");
         return Err("已有任务正在运行".into());
     }
     let guard = RunningGuard::new(&state.running);
+    append_log_line(&format!(
+        "start_batch：收到 {} 个路径（进程启动后 {} ms）",
+        req.files.len(),
+        state.started_at.elapsed().as_millis()
+    ));
 
     // Persist the settings the frontend sent with this run. Best effort: a
     // read-only config dir must not make the batch impossible to start.
@@ -275,6 +512,7 @@ fn start_batch(
         *settings = req.settings.clone();
         if let Err(error) = settings.save() {
             eprintln!("[unparanoia-gui] 启动前保存设置失败：{error}");
+            append_log_line(&format!("启动前保存设置失败：{error}"));
         }
     }
 
@@ -282,13 +520,24 @@ fn start_batch(
         let current = lock(&state.sevenzip).clone();
         match current {
             Some(info) => info,
-            None => {
-                let info = locate_sevenzip()?;
-                *lock(&state.sevenzip) = Some(info.clone());
-                info
-            }
+            None => match locate_sevenzip() {
+                Ok(info) => {
+                    *lock(&state.sevenzip) = Some(info.clone());
+                    info
+                }
+                Err(error) => {
+                    append_log_line(&format!("无法定位 7-Zip：{error}"));
+                    return Err(error);
+                }
+            },
         }
     };
+    append_log_line(&format!(
+        "7-Zip：{}（版本 {}，来源 {}）",
+        display_path(&sevenzip.exe),
+        sevenzip.version,
+        seven_zip_source(&sevenzip)
+    ));
 
     // Password pool: this run's one-off password first, then the stored list
     // (de-duplicated, so the one-off entry never appears twice).
@@ -307,16 +556,36 @@ fn start_batch(
                 }
             }
         }
-        Err(error) => eprintln!("[unparanoia-gui] 读取密码库失败：{error}"),
+        Err(error) => {
+            eprintln!("[unparanoia-gui] 读取密码库失败：{error}");
+            append_log_line(&format!("读取密码库失败：{error}"));
+        }
     }
+    append_log_line(&format!(
+        "密码池：{} 个候选（不记录密码内容）",
+        passwords.len()
+    ));
 
     let output_root = req.settings.output_root.clone();
     let inputs: Vec<PathBuf> = req.files.iter().map(PathBuf::from).collect();
     let files = expand_inputs(&inputs, true, output_root.as_deref());
     if files.is_empty() {
+        append_log_line("start_batch 失败：没有找到可处理的文件");
         return Err("没有找到可处理的文件".into());
     }
     let total = files.len();
+
+    append_log_line(&format!("开始批量：{total} 个文件"));
+    append_log_line(&format!(
+        "运行设置：{}",
+        serde_json::to_string(&req.settings).unwrap_or_else(|error| format!("序列化失败：{error}"))
+    ));
+    for path in files.iter().take(10) {
+        append_log_line(&format!("  输入：{}", display_path(path)));
+    }
+    if files.len() > 10 {
+        append_log_line(&format!("  ……其余 {} 个文件省略", files.len() - 10));
+    }
 
     let cfg = req.settings.to_run_config(passwords, None);
     let engine = Arc::new(Engine::new(SevenZip::new(sevenzip.exe.clone()), cfg));
@@ -344,6 +613,7 @@ fn start_batch(
                 run_batch_thread(handle, engine, files, cancel, gate, total);
             }));
             if result.is_err() {
+                append_log_line("批量任务线程 panic：已发送失败 summary 并释放运行标志");
                 let state = recover.state::<AppState>();
                 state.running.store(false, Ordering::SeqCst);
                 state.paused.store(false, Ordering::SeqCst);
@@ -354,7 +624,10 @@ fn start_batch(
                 let _ = recover.emit(EVENT_DONE, &fallback);
             }
         })
-        .map_err(|error| format!("无法启动后台线程：{error}"))?;
+        .map_err(|error| {
+            append_log_line(&format!("无法启动后台线程：{error}"));
+            format!("无法启动后台线程：{error}")
+        })?;
 
     guard.disarm();
     Ok(())
@@ -373,6 +646,7 @@ fn run_batch_thread(
     let sink: Sink = {
         let handle = handle.clone();
         Arc::new(move |event: TaskEvent| {
+            append_log_line(&describe_task_event(&event));
             let _ = handle.emit(EVENT_TASK, &event);
         })
     };
@@ -387,6 +661,7 @@ fn run_batch_thread(
     })) {
         Ok(summary) => summary,
         Err(_) => {
+            append_log_line("批量任务异常中止（内部错误），部分文件可能未处理");
             let _ = handle.emit(
                 EVENT_TASK,
                 &TaskEvent::Log {
@@ -400,17 +675,33 @@ fn run_batch_thread(
         }
     };
 
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         tauri::async_runtime::block_on(engine.save_processed());
-    }));
+    }))
+    .is_err()
+    {
+        append_log_line("保存 processed.json 时 panic（处理记录可能不完整）");
+    }
 
     let state = handle.state::<AppState>();
     state.running.store(false, Ordering::SeqCst);
     state.paused.store(false, Ordering::SeqCst);
     *lock(&state.summary) = Some(summary.clone());
+    append_log_line(&format!(
+        "批次结束：total={} success={} skipped={} needs_password={} failed={} cancelled={} bytes={} elapsed_ms={}",
+        summary.total,
+        summary.success,
+        summary.skipped,
+        summary.needs_password,
+        summary.failed,
+        summary.cancelled,
+        summary.bytes,
+        summary.elapsed_ms
+    ));
     let settings = lock(&state.settings).clone();
     if let Err(error) = settings.save() {
         eprintln!("[unparanoia-gui] 批量结束后保存设置失败：{error}");
+        append_log_line(&format!("批量结束后保存设置失败：{error}"));
     }
     let _ = handle.emit(EVENT_DONE, &summary);
 }
@@ -503,6 +794,86 @@ fn get_config_path() -> Result<String, String> {
     config_file_path()
         .map(|path| display_path(&path))
         .map_err(|error| error.to_string())
+}
+/// Append a frontend log line (already timestamped by the backend) to the
+/// persistent log file.
+#[tauri::command]
+fn append_log(line: String) -> Result<(), String> {
+    try_append_log_line(&line).map_err(|error| format!("写日志失败：{error}"))
+}
+
+/// Diagnostic snapshot for the settings page: paths, 7-Zip resolution, store
+/// counts and the current settings JSON (never passwords).
+#[tauri::command]
+fn diagnostics(state: State<'_, AppState>) -> Diagnostics {
+    let (seven_zip, seven_zip_version) = {
+        let current = lock(&state.sevenzip).clone();
+        match current {
+            Some(info) => (display_path(&info.exe), info.version),
+            None => match locate_sevenzip() {
+                Ok(info) => {
+                    let exe = display_path(&info.exe);
+                    let version = info.version.clone();
+                    *lock(&state.sevenzip) = Some(info);
+                    (exe, version)
+                }
+                Err(error) => {
+                    append_log_line(&format!("诊断：无法定位 7-Zip：{error}"));
+                    (String::new(), format!("未找到：{error}"))
+                }
+            },
+        }
+    };
+    let processed = ProcessedStore::load(ProcessedStore::default_path());
+    let processed_path = display_path(processed.path());
+    let processed_count = processed.count();
+    let password_count = core_load_passwords()
+        .map(|passwords| passwords.len())
+        .unwrap_or(0);
+    let settings_json = match serde_json::to_string_pretty(&*lock(&state.settings)) {
+        Ok(json) => json,
+        Err(error) => format!("序列化设置失败：{error}"),
+    };
+    let snapshot = Diagnostics {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        config_dir: config_dir()
+            .map(|path| display_path(&path))
+            .unwrap_or_default(),
+        settings_path: Settings::path()
+            .map(|path| display_path(&path))
+            .unwrap_or_default(),
+        seven_zip,
+        seven_zip_version,
+        log_path: display_path(&log_file_path()),
+        log_dir: display_path(&log_dir()),
+        processed_path,
+        processed_count,
+        password_count,
+        staging_prefix: TMP_PREFIX.to_string(),
+        settings_json,
+    };
+    append_log_line(&format!(
+        "诊断信息：version={} os={} arch={} config_dir={} settings={} seven_zip={} seven_zip_version={} log={} processed={}（{} 条）passwords={} 条 staging_prefix={}",
+        snapshot.version,
+        snapshot.os,
+        snapshot.arch,
+        snapshot.config_dir,
+        snapshot.settings_path,
+        if snapshot.seven_zip.is_empty() {
+            "-"
+        } else {
+            snapshot.seven_zip.as_str()
+        },
+        snapshot.seven_zip_version,
+        snapshot.log_path,
+        snapshot.processed_path,
+        snapshot.processed_count,
+        snapshot.password_count,
+        snapshot.staging_prefix
+    ));
+    snapshot
 }
 
 #[tauri::command]
@@ -708,6 +1079,16 @@ pub fn run() {
                 }
             };
             let settings = Settings::load();
+            // Best-effort write-back: persists the v0.3.2 settings migration
+            // (settingsVersion) on first launch. A read-only config dir must not
+            // prevent the window from opening, so failures only go to stderr.
+            match settings.save() {
+                Ok(()) => {}
+                Err(error) => eprintln!("[unparanoia-gui] 启动时保存设置失败：{error}"),
+            }
+            if let Err(error) = std::fs::create_dir_all(log_dir()) {
+                eprintln!("[unparanoia-gui] 无法创建日志目录：{error}");
+            }
             // Cold-start "Open With" arguments. Tauri/macOS injects flags such
             // as `-psn_0_...`; anything starting with '-' is not a file.
             let startup_paths: Vec<String> = std::env::args()
@@ -715,6 +1096,33 @@ pub fn run() {
                 .filter(|arg| !arg.starts_with('-'))
                 .filter(|arg| std::path::Path::new(arg).exists())
                 .collect();
+            append_log_line(&format!(
+                "应用启动：版本 {}，os {}，arch {}，pid {}",
+                env!("CARGO_PKG_VERSION"),
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                std::process::id()
+            ));
+            append_log_line(&format!(
+                "配置：config_dir={}，settings={}，日志={}",
+                config_dir()
+                    .map(|path| display_path(&path))
+                    .unwrap_or_default(),
+                Settings::path()
+                    .map(|path| display_path(&path))
+                    .unwrap_or_default(),
+                display_path(&log_file_path())
+            ));
+            match &sevenzip {
+                Some(info) => append_log_line(&format!(
+                    "7-Zip：{}（版本 {}，来源 {}）",
+                    display_path(&info.exe),
+                    info.version,
+                    seven_zip_source(info)
+                )),
+                None => append_log_line("7-Zip：启动时未找到（首次批量任务时会重试）"),
+            }
+            append_log_line(&format!("启动文件参数：{} 个", startup_paths.len()));
             app.manage(AppState::new(sevenzip, settings, startup_paths));
             Ok(())
         })
@@ -741,10 +1149,31 @@ pub fn run() {
             reveal_path,
             cleanup_staging,
             forget_processed,
+            append_log,
+            diagnostics,
         ]);
 
     if let Err(error) = builder.run(tauri::generate_context!()) {
         eprintln!("[unparanoia-gui] 应用启动失败：{error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn civil_from_days_matches_known_epoch_days() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(-1), (1969, 12, 31));
+        assert_eq!(civil_from_days(11_017), (2000, 3, 1));
+        assert_eq!(civil_from_days(19_723), (2024, 1, 1));
+    }
+
+    #[test]
+    fn shorten_only_appends_ellipsis_when_cut() {
+        assert_eq!(shorten("abc", 5), "abc");
+        assert_eq!(shorten("abcdef", 3), "abc…");
     }
 }

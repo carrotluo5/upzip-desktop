@@ -5,7 +5,8 @@
 # 在仓库内生成的 fixture 上跑真实 CLI（调用随附 7-Zip），断言:
 #   退出码 / 输出布局 / 文件内容 sha256 / JSON Lines / 密码流程 /
 #   nested 级联 / conflict 策略 / dry-run / cleanup-staging / config /
-#   分段压缩包（普通分卷、SSEFE .enc 分卷、只给非首卷、缺后续卷）。
+#   分段压缩包（普通分卷、SSEFE .enc 分卷、只给非首卷、缺后续卷）/
+#   跳过已处理（v0.3.2 默认关闭、--skip-processed 才启用、related_paths）。
 #
 # 用法: ./scripts/e2e-verify.sh
 #   - 需要 testdata/fixtures/（缺失时自动调用 scripts/make-fixtures.sh，需要 macOS + binaries/mac/7zz）
@@ -77,7 +78,7 @@ echo
 echo "== 1. 基础命令"
 run_cli --version
 check "--version" 0 "${RC}"
-if [[ "${OUT}" == *"0.3.1"* ]]; then pass "--version 含 0.3.1"; else fail "--version 不含 0.3.1: ${OUT}"; fi
+if [[ "${OUT}" == *"0.3.2"* ]]; then pass "--version 含 0.3.2"; else fail "--version 不含 0.3.2: ${OUT}"; fi
 
 RESET_CONFIG
 run_cli doctor
@@ -329,6 +330,99 @@ check "缺后续卷 exit 1" 1 "${RC}"
 printf '%s\n%s\n' "${OUT}" "${ERR}" > "${TMP}/split-missing.txt"
 contains "缺后续卷明确报错" "${TMP}/split-missing.txt" "缺少后续卷"
 if [[ -d "${OUTDIR}" ]] && find "${OUTDIR}" -type f | grep -q .; then fail "缺后续卷却产出了半成品"; else pass "缺后续卷无半成品"; fi
+
+echo
+echo "== 12. 跳过已处理（v0.3.2：默认关闭，--skip-processed 才启用）"
+# ① 默认配置连续两次 run 都应真正处理（success=1），且不生成 processed.json。
+RESET_CONFIG
+OUTDIR="${TMP}/out-skip-default"
+run_cli run "${FIX}/sample.enc" -p 123 -o "${OUTDIR}" --json
+check "默认第 1 次 run exit 0" 0 "${RC}"
+printf '%s\n' "${OUT}" > "${TMP}/skip-default-1.jsonl"
+if python3 - "${TMP}/skip-default-1.jsonl" <<'PY'
+import json, sys
+events = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+s = [e for e in events if e.get("type") == "summary"]
+assert len(s) == 1 and s[0]["success"] == 1 and s[0]["skipped"] == 0, s
+PY
+then pass "默认第 1 次 run success=1（未跳过）"; else fail "默认第 1 次 run 未成功处理"; fi
+
+run_cli run "${FIX}/sample.enc" -p 123 -o "${OUTDIR}" --json
+check "默认第 2 次 run exit 0" 0 "${RC}"
+printf '%s\n' "${OUT}" > "${TMP}/skip-default-2.jsonl"
+if python3 - "${TMP}/skip-default-2.jsonl" <<'PY'
+import json, sys
+events = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+s = [e for e in events if e.get("type") == "summary"]
+o = [e["outcome"] for e in events if e.get("type") == "task_finished"]
+assert len(s) == 1 and s[0]["success"] == 1 and s[0]["skipped"] == 0, s
+assert len(o) == 1 and o[0]["status"] == "success", o
+PY
+then pass "默认第 2 次 run 仍 success=1（默认不按历史跳过）"; else fail "默认第 2 次 run 被跳过"; fi
+if [[ ! -e "${UNPARANOIA_CONFIG_DIR}/processed.json" ]]; then
+  pass "默认配置跑完不生成 processed.json"
+else
+  fail "默认配置跑完却生成了 processed.json"
+fi
+
+# ② 只有 --skip-processed 才启用指纹跳过：第 1 次成功并写记录，第 2 次 Skipped 且 reason 含「已处理过」。
+RESET_CONFIG
+OUTDIR="${TMP}/out-skip-optin"
+run_cli run "${FIX}/sample.enc" -p 123 -o "${OUTDIR}" --skip-processed --json
+check "--skip-processed 第 1 次 exit 0" 0 "${RC}"
+if [[ -f "${UNPARANOIA_CONFIG_DIR}/processed.json" ]]; then
+  pass "--skip-processed 第 1 次写入 processed.json"
+else
+  fail "--skip-processed 第 1 次未写入 processed.json"
+fi
+run_cli run "${FIX}/sample.enc" -p 123 -o "${OUTDIR}" --skip-processed --json
+check "--skip-processed 第 2 次 exit 0" 0 "${RC}"
+printf '%s\n' "${OUT}" > "${TMP}/skip-optin-2.jsonl"
+if python3 - "${TMP}/skip-optin-2.jsonl" <<'PY'
+import json, sys
+events = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+o = [e["outcome"] for e in events if e.get("type") == "task_finished"]
+s = [e for e in events if e.get("type") == "summary"]
+assert len(o) == 1 and o[0]["status"] == "skipped", o
+assert "已处理过" in (o[0].get("reason") or ""), o[0]
+assert len(s) == 1 and s[0]["skipped"] == 1 and s[0]["success"] == 0, s
+PY
+then pass "--skip-processed 第 2 次 Skipped 且 reason 含「已处理过」"; else fail "--skip-processed 第 2 次未按历史跳过"; fi
+
+# ③ 分卷任务 outcome.related_paths 必须含全族卷路径（fixture 为 4 卷 .enc）。
+SPLIT_VOL_COUNT="$(ls "${FIX}"/split.7z.*.enc 2>/dev/null | wc -l | tr -d ' ')"
+RESET_CONFIG
+OUTDIR="${TMP}/out-skip-split"
+run_cli run "${FIX}/split.7z.001.enc" "${FIX}/split.7z.002.enc" -p wrong -p 123 -o "${OUTDIR}" --json
+check "分卷 --json exit 0" 0 "${RC}"
+printf '%s\n' "${OUT}" > "${TMP}/skip-split.jsonl"
+if python3 - "${SPLIT_VOL_COUNT}" "${TMP}/skip-split.jsonl" <<'PY'
+import json, os, sys
+expected = int(sys.argv[1])
+events = [json.loads(line) for line in open(sys.argv[2], encoding="utf-8") if line.strip()]
+o = [e["outcome"] for e in events if e.get("type") == "task_finished"]
+assert len(o) == 1, o
+related = o[0].get("related_paths")
+assert isinstance(related, list) and len(related) == expected, (expected, related)
+assert all(isinstance(p, str) and p.endswith(".enc") for p in related), related
+assert all(os.path.exists(p) for p in related), related
+assert os.path.basename(related[0]).endswith("001.enc"), related
+PY
+then pass "分卷 related_paths 含 ${SPLIT_VOL_COUNT} 个 .enc 卷路径"; else fail "分卷 related_paths 断言失败"; fi
+
+# ④ 清除 processed.json 后，默认 run 应重新成功处理。
+rm -f "${UNPARANOIA_CONFIG_DIR}/processed.json"
+OUTDIR="${TMP}/out-skip-cleared"
+run_cli run "${FIX}/sample.enc" -p 123 -o "${OUTDIR}" --json
+check "清除 processed.json 后默认 run exit 0" 0 "${RC}"
+printf '%s\n' "${OUT}" > "${TMP}/skip-cleared.jsonl"
+if python3 - "${TMP}/skip-cleared.jsonl" <<'PY'
+import json, sys
+events = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+s = [e for e in events if e.get("type") == "summary"]
+assert len(s) == 1 and s[0]["success"] == 1 and s[0]["skipped"] == 0, s
+PY
+then pass "清除记录后默认 run success=1"; else fail "清除记录后默认 run 未成功"; fi
 
 echo
 echo "== 11. 退出码 2（用法错误）"

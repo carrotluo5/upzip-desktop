@@ -207,7 +207,8 @@ unparanoia-cli cleanup-staging [--root DIR]...
 `run` 主要选项：`-p/--password`（可重复）、`-o/--output-dir`、`-j/--jobs`、
 `--conflict rename|skip|overwrite`、`--layout smart|folder|direct`、`--no-recursive`、
 `--no-nested`、`--max-depth 1-8`、`--keep-broken`、`--dry-run`、`--force-documents`、
-`--allow-execute-sfx`、`--stop-on-error`、`--no-skip-processed`、`--no-strip-junk`、
+`--allow-execute-sfx`、`--stop-on-error`、`--skip-processed`（默认不跳过；旧
+`--no-skip-processed` 仍接受但为兼容 no-op）、`--no-strip-junk`、
 `--try-empty-password`、`--json`、`--sevenzip PATH`。
 
 退出码: 0=全部成功/跳过；1=存在失败或需要密码；2=用法/配置/环境错误；130=被中断。

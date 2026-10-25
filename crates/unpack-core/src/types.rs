@@ -121,6 +121,11 @@ pub struct TaskOutcome {
     pub task_id: u64,
     pub status: Option<TaskStatus>,
     pub path: PathBuf,
+    /// Every volume path of a split archive family (first volume first, in
+    /// volume order). The task is represented by the first volume, so the GUI
+    /// uses this to settle the status rows of the sibling volumes too. Empty
+    /// for standalone files.
+    pub related_paths: Vec<PathBuf>,
     pub detection: Option<Detection>,
     pub dest: Option<PathBuf>,
     pub files: usize,
@@ -218,6 +223,11 @@ pub struct RunConfig {
     /// `-p` as "prompt me", which we cannot feed interactively).
     pub try_empty_password: bool,
     /// Skip archives whose fingerprint was already extracted successfully.
+    ///
+    /// Off by default: silently skipping on stale history records is confusing
+    /// (and a record written by a debug run must not hide the user's file).
+    /// The GUI/CLI opt in explicitly, and the v2 settings migration resets the
+    /// old default once.
     pub skip_processed: bool,
     /// Strip `__MACOSX`, `.DS_Store`, `._*`, `Thumbs.db` from the result.
     pub strip_junk: bool,
@@ -262,7 +272,7 @@ impl Default for RunConfig {
             jobs: 2,
             keep_broken: false,
             try_empty_password: false,
-            skip_processed: true,
+            skip_processed: false,
             strip_junk: true,
             nested: true,
             max_depth: 4,
