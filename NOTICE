@@ -1,6 +1,6 @@
 # NOTICE
 
-Unparanoia（帕罗诺亚解包器）本体
+Upzip（智能批量解压）本体
 ------------------------------------------------
 Copyright (c) 2026 nanase
 以 MIT License 发布，完整文本见仓库根目录 LICENSE。
@@ -28,8 +28,8 @@ Copyright (c) 2026 nanase
 macOS 产物在 `.app/Contents/Resources/binaries/mac/` 随附 `7zz` 与许可证；
 Windows 产物（v0.3.1 起为单 exe）用 `include_bytes!` 把 `7z.exe`、`7z.dll`、
 许可证**逐字节内嵌**进 exe，首次运行时解压到用户缓存目录
-`%LOCALAPPDATA%\Unparanoia\embedded-7z\25.01-r1\` 再以子进程调用；许可证原文同时
-内嵌、可用 `unparanoia-cli --licenses` 或 GUI 设置页查看。内嵌不改变上述许可义务。
+`%LOCALAPPDATA%\Upzip\embedded-7z\25.01-r1\` 再以子进程调用；许可证原文同时
+内嵌、可用 `upzip-cli --licenses` 或 GUI 设置页查看。内嵌不改变上述许可义务。
 
 来源说明（诚实边界）
 --------------------

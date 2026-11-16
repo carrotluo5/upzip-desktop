@@ -9,6 +9,7 @@ Windows 锁文件错误（5/32/225）自动重试、日志落盘与设置页诊�
 `-webkit-text-security: disc` 掩码，WebView2 下中文输入法可直接键入（不支持则回退
 `type=password`）。两条路线都
 **没有在真实 Windows 上运行验证过**——这是本项目当前最大的验证缺口，详见 §5「诚实边界」。
+0.4.0 将产品更名为 **Upzip**：exe、便携包、内嵌缓存目录与事件名同步更名，构建流程不变。
 
 ## 1. 路线 A：macOS 交叉编译便携版（本仓库实测可跑通编译）
 
@@ -33,19 +34,19 @@ export PATH="$HOME/.cargo/bin:$PATH"     # Homebrew 的 rust 默认不带 Window
    CLI 混在同一条 `-p` 命令里）：
 
    ```bash
-   cargo xwin build --release --target x86_64-pc-windows-msvc -p unparanoia --features custom-protocol
-   cargo xwin build --release --target x86_64-pc-windows-msvc -p unparanoia-cli
+   cargo xwin build --release --target x86_64-pc-windows-msvc -p upzip --features custom-protocol
+   cargo xwin build --release --target x86_64-pc-windows-msvc -p upzip-cli
    ```
 
-5. 组装单 exe 便携包 `target/windows-portable/Unparanoia-<ver>-win-x64-portable/`：
-   `Unparanoia.exe`（GUI，内嵌前端 + 7-Zip）、`unparanoia-cli.exe`（内嵌 7-Zip）、
+5. 组装单 exe 便携包 `target/windows-portable/Upzip-<ver>-win-x64-portable/`：
+   `Upzip.exe`（GUI，内嵌前端 + 7-Zip）、`upzip-cli.exe`（内嵌 7-Zip）、
    `7z-LICENSE.txt`、`README.txt`、`SHA256SUMS`；**不再放** `7z.exe`/`7z.dll`；
 6. 用随附 7zz 打成 `...-portable.zip`，打印 zip 与两个 exe 的大小/SHA-256。
 
 便携包运行要求：Windows 10/11 **x64**；Windows 11 自带 WebView2 Runtime，
 Windows 10 需装 Evergreen Runtime；免安装、无需管理员权限、不写系统目录。
 两个 exe 都已内嵌 7-Zip 25.01：首次运行会把运行时解压到
-`%LOCALAPPDATA%\Unparanoia\embedded-7z\25.01-r1\`（可用 `UNPARANOIA_7Z_CACHE_DIR`
+`%LOCALAPPDATA%\Upzip\embedded-7z\25.01-r1\`（可用 `UPZIP_7Z_CACHE_DIR`
 覆盖缓存根目录），之后复用。因此**可以只拷 exe 单独运行**，不依赖同目录 sidecar。
 
 首次 `cargo xwin build` 会下载约 1.1 GB 的 MSVC CRT/SDK 到
@@ -68,10 +69,10 @@ pnpm 11、WebView2 Runtime。
 
 | 产物 | 路径 |
 |---|---|
-| NSIS 安装包 | `target\release\bundle\nsis\Unparanoia_<ver>_x64-setup.exe` |
-| GUI exe | `target\release\unparanoia.exe` |
-| CLI exe | `target\release\unparanoia-cli.exe` |
-| 便携 zip（`-Portable`） | `target\windows-portable\Unparanoia-<ver>-win-x64-portable.zip` |
+| NSIS 安装包 | `target\release\bundle\nsis\Upzip_<ver>_x64-setup.exe` |
+| GUI exe | `target\release\upzip.exe` |
+| CLI exe | `target\release\upzip-cli.exe` |
+| 便携 zip（`-Portable`） | `target\windows-portable\Upzip-<ver>-win-x64-portable.zip` |
 
 Windows 专用 Tauri 配置在 `gui/src-tauri/tauri.windows.conf.json`（NSIS 安装界面语言
 简体中文 + English）。注意：0.3.1 起 GUI/CLI 已内嵌 7-Zip，运行时不再解析 sidecar；
@@ -98,14 +99,31 @@ Windows 专用 Tauri 配置在 `gui/src-tauri/tauri.windows.conf.json`（NSIS �
 | NSIS 打包失败（在 macOS 上） | 不支持交叉打 NSIS；用便携版 zip，或去真实 Windows 构建 |
 | exe 启动白屏 / 卡在 `localhost:1420` | 裸 `cargo build` 构建 GUI 时漏了 `--features custom-protocol`；构建脚本与 `tauri build` 已自动带 |
 | exe 启动报缺少 WebView2 | Win10 装 Evergreen Runtime；Win11 默认自带 |
-| GUI 没有反应/异常，需要日志 | 日志在 `%APPDATA%\unparanoia\logs\unparanoia.log`（>2 MiB 轮转为 `unparanoia.log.1`）；GUI 设置页「诊断信息」可复制诊断 JSON（版本、路径、7-Zip 来源、配置摘要）或「打开日志目录」 |
-| 7-Zip 报错看不懂 | v0.3.2 起错误信息包含 7z 路径、OS 错误/退出码、stderr 尾部（≤1000 字符），并提示可设 `UNPARANOIA_7Z` 指向已安装 7-Zip；锁文件错误 5/32/225 会自动重试最多 3 次（间隔 150 ms）后再报错 |
+| GUI 没有反应/异常，需要日志 | 日志在 `%APPDATA%\upzip\logs\upzip.log`（>2 MiB 轮转为 `upzip.log.1`）；GUI 设置页「诊断信息」可复制诊断 JSON（版本、路径、7-Zip 来源、配置摘要）或「打开日志目录」 |
+| 7-Zip 报错看不懂 | v0.3.2 起错误信息包含 7z 路径、OS 错误/退出码、stderr 尾部（≤1000 字符），并提示可设 `UPZIP_7Z` 指向已安装 7-Zip；锁文件错误 5/32/225 会自动重试最多 3 次（间隔 150 ms）后再报错 |
 | 第二次拖同一文件没有重新解压 | v0.3.2 起「跳过已处理」**默认关闭**（旧配置一次性迁移）；只有开启后才会按 `processed.json` 跳过。如需重跑：GUI 设置页「清除处理记录」，或 CLI 加 `--skip-processed` 才启用跳过 |
 | GUI 解密时闪过黑色控制台窗口 | v0.3.1 及更早的已知问题；v0.3.2 起 7z 子进程使用 `CREATE_NO_WINDOW`，GUI 不再弹窗（真机待验证） |
 | 解压时主进度条随文件名/输出路径忽长忽短 | v0.3.1 及更早的单行布局中活动文本按内容伸缩；v0.3.3 起进度条独占一行（宽度只随窗口变化）、活动文本另起一行省略（纯前端修复，真机待验证） |
 | 密码管理/追加密码框无法用中文输入法直接键入（只能粘贴） | v0.3.1 及更早使用 `type="password"`，Windows WebView2 下 IME 行为异常；v0.3.3 起在支持 `-webkit-text-security` 的 WebView 上改用 `type="text"` + `disc` 掩码，不支持时自动回退 `type="password"`；真机 WebView2 待验证 |
 
 ## 5. 诚实边界（必须保留）
+
+**v0.4.0 构建记录（2026-11-17，macOS 交叉编译，`./scripts/build-windows-portable.sh`
+exit 0，仅有 LNK4099 之类 PDB 警告）**：
+
+| 产物 | 大小 (B) | SHA-256 |
+|---|---|---|
+| 便携 zip `target/windows-portable/Upzip-0.4.0-win-x64-portable.zip` | 7,420,427 | `941036932ffde622fb0d1c93dd9d87caf3b886c7e560417ff9bc89655fbc1452` |
+| 包内 GUI `Upzip.exe`（PE32+ GUI x86-64，FileVersion 0.4.0） | 14,031,360 | `a4bb98d6eff012a33897d3b7635a99f9f9f9d4eb6f0edab89e5d3834883b1728` |
+| 包内 CLI `upzip-cli.exe`（PE32+ console x86-64） | 6,514,688 | `2b35a2304646255acd8c623a1ff51c6500ade0fc999cea7ecc517334c54ee2b8` |
+
+- zip 顶层目录 `Upzip-0.4.0-win-x64-portable/`，含两个 exe、`7z-LICENSE.txt`（6,029 B）、
+  `README.txt`、`SHA256SUMS`，无 sidecar `7z.exe`/`7z.dll`；`shasum -a 256 -c SHA256SUMS` 全 OK。
+- GUI exe 内嵌前端资源（`/assets/index-j9lH0oOW.css`、`index-DXGHOrB2.js`）与内嵌 7-Zip 字节，
+  单 exe 生效；**仍未在真实 Windows 上运行**，未做 Authenticode 签名。
+- Release v0.4.0 的资产 digest 与本地一致；GitHub Actions run 43959077126 的 Windows job 通过。
+
+> 以下为 v0.3.x 历史记录，文件名沿用当时的 Unparanoia 命名；当前版本为 Upzip 0.4.0。
 
 **已验证**（macOS 主机交叉编译，2026-10-25，
 `./scripts/build-windows-portable.sh` exit 0，仅有 LNK4099 之类 PDB 警告，与产物无关）。
@@ -146,7 +164,7 @@ Windows 专用 Tauri 配置在 `gui/src-tauri/tauri.windows.conf.json`（NSIS �
 
 - **未在真实 Windows 11 上启动过 GUI/CLI**（用户将真机验证），未验证 WebView2、
   中文路径/盘符、长路径、UAC、只读目录、首次解压缓存
-  `%LOCALAPPDATA%\Unparanoia\embedded-7z\25.01-r1\` 的写入权限；
+  `%LOCALAPPDATA%\Upzip\embedded-7z\25.01-r1\` 的写入权限；
 - 未验证 7z.exe 子进程在 Windows 的密码传递（本项目通过 argv/环境变量传密码，
   同机其他进程理论上可读——Windows 上无有效隔离手段，属于已知风险）；
 - NSIS 安装包（`scripts/build-windows.ps1` 非 `-Portable` 路线）未构建、未验证；
@@ -158,8 +176,8 @@ Windows 专用 Tauri 配置在 `gui/src-tauri/tauri.windows.conf.json`（NSIS �
   v0.3.2/v0.3.3 最终构建均如此，见 BUILD.md §7 与 VERIFICATION.md §7）。与 Windows 交叉编译无关。
 
 首次正式发布前，必须在一台真实 Windows 11 x64 上执行：
-`unparanoia-cli.exe doctor`、真实样本解密（含分卷 `.enc` 组）、GUI 拖放、
+`upzip-cli.exe doctor`、真实样本解密（含分卷 `.enc` 组）、GUI 拖放、
 单 exe 首次运行（确认内嵌 7-Zip 缓存解压成功）、确认无控制台闪窗、
-GUI 设置页「诊断信息」与日志文件 `%APPDATA%\unparanoia\logs\unparanoia.log`，
+GUI 设置页「诊断信息」与日志文件 `%APPDATA%\upzip\logs\upzip.log`，
 并把结果补进 VERIFICATION.md。
 

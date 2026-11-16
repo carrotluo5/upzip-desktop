@@ -1,7 +1,8 @@
 # 输出布局与处理流程（OUTPUT-LAYOUT）
 
-本文描述 v0.3.3（Unparanoia）解包引擎**实际写入磁盘的行为**（v0.3.3 为纯 GUI 修复，
-引擎写入行为与 v0.3.2 相同）：目录怎么决定、内层怎么落盘、
+本文描述 **Upzip 0.4.0** 解包引擎**实际写入磁盘的行为**（0.4.0 为产品更名，磁盘语义未变，
+仅临时目录前缀、配置目录名随 `upzip` 更新；v0.3.3 为纯 GUI 修复，未改引擎写入行为）：
+目录怎么决定、内层怎么落盘、
 分段压缩包怎么聚合、冲突怎么办、临时与残留如何管理、口令怎么重试、失败/跳过的判定。
 所有规则以代码为准，位置指向 `crates/unpack-core/src/`（2026-10-25 v0.3.3 工作树；
 函数名比行号更稳）。
@@ -31,7 +32,7 @@
 候选池由 `password_candidates(cfg, det)` 在**每一层**独立构建（外层和内层互不继承"已成功"的口令）：
 
 1. `RunConfig.passwords`（source = `config`）：CLI 的 `-p`（可重复，按给定顺序）→
-   环境变量 `UNPARANOIA_PASSWORD`（兼容旧名 `PARANOIA_ENC_PASSWORD`）→ 密码库
+   环境变量 `UPZIP_PASSWORD`（兼容旧名 `PARANOIA_ENC_PASSWORD`）→ 密码库
    `config.json` 的全部条目；GUI 用请求里的密码 + 密码库。
 2. 归档注释里的提示（source = `hint`）。
 3. 空口令（source = `empty`，仅当 `--try-empty-password`/设置开启）。
@@ -137,7 +138,7 @@ truncated.7z.001.enc（只有首卷）              -> Failed「缺少后续卷�
 
 ## 4. 临时目录、原子落地与残留
 
-- staging 目录 = `plan.parent` 下 `.unparanoia-tmp-<uuid>`（`TMP_PREFIX` 常量
+- staging 目录 = `plan.parent` 下 `.upzip-tmp-<uuid>`（`TMP_PREFIX` 常量
   `crates/unpack-core/src/lib.rs`；创建见 `engine.rs:446-447`、`:846-847`）。
 - 7-Zip 先解到 staging，`land` 阶段再用 `util::move_path` 落地：
   `fs::rename` 优先，跨卷时 `copy_recursive + remove`（`util.rs:144-152`）。
@@ -147,8 +148,8 @@ truncated.7z.001.enc（只有首卷）              -> Failed「缺少后续卷�
   （即使失败也不保留明文）。
 - 失败时：默认**清 staging**；若 `--keep-broken`，staging 保留以便人工检查
   （`engine.rs:113-130` 的 `bail!` 分支）。CLI 输出路径会指向 staging。
-- 崩溃/断电残留：`.unparanoia-tmp-*` 目录/文件留在输出位置，可用
-  `unparanoia-cli cleanup-staging --root DIR` 清理（GUI 设置页同功能）。
+- 崩溃/断电残留：`.upzip-tmp-*` 目录/文件留在输出位置，可用
+  `upzip-cli cleanup-staging --root DIR` 清理（GUI 设置页同功能）。
   该命令只删前缀匹配项，不动其他文件。
 - 磁盘空间：解压前用 `total_uncompressed × min_free_ratio`（默认 1.1）与
   `plan.parent` 的可用空间比较，不足则提前失败（`engine.rs:429-443`）；
@@ -170,7 +171,7 @@ truncated.7z.001.enc（只有首卷）              -> Failed「缺少后续卷�
 - 只有显式开启（CLI `--skip-processed`，或 GUI 设置页开关）后才有跳过行为：
   成功处理过的输入会以 fingerprint（size + 小写文件名 + 头部 8 MiB 的 SHA-256，
   `util.rs:29-40`）记进 `processed.json`（配置目录，默认
-  `~/Library/Application Support/unparanoia/` / `%APPDATA%\unparanoia\`）。
+  `~/Library/Application Support/upzip/` / `%APPDATA%\upzip\`）。
   再次处理同一文件会显示「已处理过（历史记录跳过）：如需重新解压请点「重新解压」
   或在设置中关闭「跳过已处理」」并以成功计（exit 0），**不产生输出**。
   - 验证/重跑时不要开跳过；若之前开启过并写入了记录，可删除 `processed.json`、

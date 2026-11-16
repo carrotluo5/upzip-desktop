@@ -1,10 +1,16 @@
-# unparanoia-core — 内部 API 契约（v0.3.0）
+# upzip-core — 内部 API 契约（v0.3.0）
 
 本文件是 core crate 与 GUI/CLI 的接口约定。core 的公开 API 一旦写下即视为稳定；GUI 侧按此调用。
 
+> 本文正文是 v0.3.0 契约的快照，其中 `CONFIG_DIR_NAME = "unparanoia"`、
+> `LEGACY_CONFIG_DIR_NAME = "paranoia-enc-decryptor"`、`UNPARANOIA_*` 环境变量和
+> `unparanoia-cli` 示例都是当时的写法。0.4.0 起的实际值是：crate `upzip-core`、
+> `CONFIG_DIR_NAME = "upzip"`、`LEGACY_CONFIG_DIR_NAME = "unparanoia"`、
+> 环境变量 `UPZIP_*`（旧名兼容读取）、CLI 二进制 `upzip-cli`。
+
 ## Crate
 
-- 名称: `unparanoia-core` (path: `crates/core`)
+- 名称: `upzip-core` (path: `crates/core`)
 - Rust edition 2021, 无 async、无网络、无 GUI 依赖，纯同步逻辑（GUI 在自己的线程里调用）。
 - 所有错误类型实现 `std::error::Error + Display`，并暴露稳定的 `kind() -> &'static str` 供 GUI 本地化。
 

@@ -12,6 +12,12 @@
 > **未在真实 Windows 上启动**。
 > 本文严格区分「本机已验证」「历史记录」「断言但未验证」，不把三者混为一谈。
 
+> v0.4.0（2026-11-17）：产品更名为 Upzip，crate/二进制/配置目录/环境变量/事件名同步更名，
+> 引擎与 CLI 行为未变。macOS 产物与 GUI 启动已在本机验证（见 [BUILD.md](BUILD.md) §7、
+> `docs/screenshots/gui-0.4.0.png`），Windows 便携包已交叉编译并记录哈希
+> （见 [WINDOWS_BUILD.md](WINDOWS_BUILD.md) §5），GitHub Actions run 43959077126 的
+> macOS / Windows 两个 job 均通过。**真实 Windows 运行仍是未验证项**，与下文缺口一致。
+
 ## 1. 环境
 
 | 项 | 值 |
@@ -102,7 +108,7 @@ header raw/version/algorithm/customParams、salt、Argon2 t/m/p/output_len、
 ```bash
 PARANOIA_SAMPLE_ENC=/path/3138.7z.001.enc \
 PARANOIA_SAMPLE_SHA256=9d001d6c...e40c \
-cargo test -p unparanoia-core --test real_sample -- --ignored
+cargo test -p upzip-core --test real_sample -- --ignored
 ```
 
 - 测试 1：`decrypt_file` 输出与期望 SHA-256 一致；
@@ -161,7 +167,7 @@ gzip 3.42 kB，JS 283.31 kB / gzip 85.77 kB）。
 9. `config --show/--set-password/--clear-password`（v0.2.0 兼容）以及
    `--add-password/--list-passwords/--remove-password/--clear-passwords`：
    密码库文件创建、Unix 0600、无 `-p` 时自动用密码库解密成功、删空/清空；
-   `cleanup-staging` 只删 `.unparanoia-tmp-*`；
+   `cleanup-staging` 只删 `.upzip-tmp-*`；
 10. **分卷压缩包（v0.3.1）**：
     (a) 普通分卷 `split.7z.001`（同目录有 002-004）→ exit 0，输出
         `split/hello.txt` 与 `split/blob.bin`，SHA-256 均匹配；
@@ -190,6 +196,8 @@ fixture 内容（`testdata/fixtures/`，gitignored；每次生成 mtime/salt 不
 `split.7z.001..004`（普通分卷，1 MiB 一卷，含 3 MiB 零填充 blob）、
 `split.7z.001.enc..004.enc`（每卷分别被 Paranoia v4 加密，SSEFE 分卷组）、
 `truncated.7z.001.enc`（只有首卷，用于缺卷失败用例）、`SHA256SUMS`。
+
+> 以下为 v0.3.x 历史记录，文件名沿用当时的 Unparanoia 命名；当前版本为 Upzip 0.4.0。
 
 ## 7. 构建产物（v0.3.3 最终记录：2026-10-25）
 
