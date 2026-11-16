@@ -26,8 +26,8 @@ jobs:
   # macOS: 单测 + 前端 + e2e + tauri 打包（.app / .dmg）
   # ---------------------------------------------------------------------------
   macos:
-    name: macOS (arm64)
-    runs-on: macos-14
+    name: macOS (latest)
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -49,6 +49,14 @@ jobs:
           cache: pnpm
           cache-dependency-path: gui/pnpm-lock.yaml
 
+      # gui/src-tauri/binaries/ 是 .gitignore 的构建期镜像，tauri 的 bundle.resources
+      # 引用它；cargo test 会编译 gui（tauri-build 校验资源存在），所以必须先镜像。
+      - name: Install frontend deps
+        run: pnpm --dir gui install --frozen-lockfile
+
+      - name: Sync bundled 7-Zip resources
+        run: pnpm --dir gui sync:binaries
+
       - name: cargo test (workspace)
         run: cargo test --workspace
 
@@ -60,9 +68,6 @@ jobs:
 
       - name: Run CLI e2e
         run: ./scripts/e2e-verify.sh
-
-      - name: Install frontend deps
-        run: pnpm --dir gui install --frozen-lockfile
 
       - name: Build frontend
         run: pnpm --dir gui build
@@ -107,15 +112,16 @@ jobs:
           cache: pnpm
           cache-dependency-path: gui/pnpm-lock.yaml
 
-      - name: cargo test (workspace)
-        run: cargo test --workspace
-
-      # 前端 dist 必须先构建：Tauri 在编译期把 dist 内嵌进 exe（自定义协议）。
+      # gui/src-tauri/binaries/ 是 .gitignore 的构建期镜像（tauri 资源引用它），
+      # 必须在 cargo test 之前生成，否则 tauri-build 校验资源存在性会失败。
       - name: Install frontend deps
         run: pnpm --dir gui install --frozen-lockfile
 
       - name: Sync bundled 7-Zip resources
         run: pnpm --dir gui sync:binaries
+
+      - name: cargo test (workspace)
+        run: cargo test --workspace
 
       - name: Build frontend
         run: pnpm --dir gui build
