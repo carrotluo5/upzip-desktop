@@ -93,10 +93,10 @@ if [[ -d "${BUNDLE_DIR}/macos" ]]; then
     printf '  %8s  %s\n' "$(human_size "${artifact}")" "${artifact#${ROOT_DIR}/}"
   done
 fi
-if [[ -x "${BIN_DIR}/unparanoia" ]]; then
+if [[ -x "${BIN_DIR}/upzip" ]]; then
   found=1
-  printf '  %8s  %s\n         sha256 %s\n' "$(human_size "${BIN_DIR}/unparanoia")" \
-    "target/release/upzip" "$(sha256_of "${BIN_DIR}/unparanoia")"
+  printf '  %8s  %s\n         sha256 %s\n' "$(human_size "${BIN_DIR}/upzip")" \
+    "target/release/upzip" "$(sha256_of "${BIN_DIR}/upzip")"
 fi
 if [[ -x "${BIN_DIR}/upzip-cli" ]]; then
   found=1

@@ -86,7 +86,7 @@ if ($Portable) {
   $zipPath = "$Root\target\windows-portable\$pkgName.zip"
   Remove-Item -Recurse -Force $pkgDir -ErrorAction SilentlyContinue
   New-Item -ItemType Directory -Force -Path $pkgDir | Out-Null
-  Copy-Item "$Root\target\release\unparanoia.exe" "$pkgDir\Upzip.exe"
+  Copy-Item "$Root\target\release\upzip.exe" "$pkgDir\Upzip.exe"
   Copy-Item "$Root\target\release\upzip-cli.exe" "$pkgDir\upzip-cli.exe"
   Copy-Item "$Root\binaries\7z-LICENSE.txt" "$pkgDir\7z-LICENSE.txt"
   @(
@@ -135,7 +135,7 @@ if ($Portable) {
       Write-Host ("               sha256 {0}" -f (Sha256 $_.FullName))
     }
   }
-  foreach ($name in @('unparanoia.exe','upzip-cli.exe')) {
+  foreach ($name in @('upzip.exe','upzip-cli.exe')) {
     $p = Join-Path "$Root\target\release" $name
     if (Test-Path $p) {
       $found = $true

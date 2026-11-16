@@ -21,6 +21,9 @@ FIX="${ROOT}/testdata/fixtures"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/unparanoia-e2e.XXXXXX")"
 export UPZIP_CONFIG_DIR="${TMP}/config"
 mkdir -p "${UPZIP_CONFIG_DIR}"
+# 隔离历史配置导入：首次加载时会把旧版 unparanoia 配置目录里的密码库导入进来，
+# 若本机存在旧配置，错误口令/密码库用例会被污染（CI 干净机器上无此问题，本地却会）。
+export PARANOIA_ENC_CONFIG_DIR="${TMP}/legacy-unparanoia"
 
 cleanup() { rm -rf "${TMP}"; }
 trap cleanup EXIT
@@ -76,9 +79,10 @@ RESET_CONFIG() { rm -rf "${UPZIP_CONFIG_DIR}"; mkdir -p "${UPZIP_CONFIG_DIR}"; }
 
 echo
 echo "== 1. 基础命令"
+PKG_VERSION="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' "${ROOT}/Cargo.toml" | head -n1)"
 run_cli --version
 check "--version" 0 "${RC}"
-if [[ "${OUT}" == *"0.3.3"* ]]; then pass "--version 含 0.3.3"; else fail "--version 不含 0.3.3: ${OUT}"; fi
+if [[ -n "${PKG_VERSION}" && "${OUT}" == *"${PKG_VERSION}"* ]]; then pass "--version 含 ${PKG_VERSION}"; else fail "--version 不含 ${PKG_VERSION}: ${OUT}"; fi
 
 RESET_CONFIG
 run_cli doctor

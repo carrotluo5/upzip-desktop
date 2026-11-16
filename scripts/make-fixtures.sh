@@ -71,15 +71,15 @@ echo "== 5/10 masked.mp4 (4 KiB MP4-like prefix + ZIP payload)"
 cat "$WORK/prefix.bin" "$WORK/normal.zip" > "$FIX/masked.mp4"
 
 echo "== 6/10 sample.enc (make_enc hello.txt, password 123, customParams 00)"
-cargo run -q --manifest-path "$ROOT/Cargo.toml" -p unparanoia-core --features testkit --example make_enc -- \
+cargo run -q --manifest-path "$ROOT/Cargo.toml" -p upzip-core --features testkit --example make_enc -- \
   "$WORK/payload/hello.txt" "$FIX/sample.enc" 123
 
 echo "== 7/10 nested.enc (make_enc nested.zip, password 123, customParams 00)"
-cargo run -q --manifest-path "$ROOT/Cargo.toml" -p unparanoia-core --features testkit --example make_enc -- \
+cargo run -q --manifest-path "$ROOT/Cargo.toml" -p upzip-core --features testkit --example make_enc -- \
   "$FIX/nested.zip" "$FIX/nested.enc" 123
 
 echo "== 8/10 layered.enc (make_enc encrypted-inner.7z, password outer, customParams 00)"
-cargo run -q --manifest-path "$ROOT/Cargo.toml" -p unparanoia-core --features testkit --example make_enc -- \
+cargo run -q --manifest-path "$ROOT/Cargo.toml" -p upzip-core --features testkit --example make_enc -- \
   "$FIX/encrypted-inner.7z" "$FIX/layered.enc" outer
 
 echo "== 9/10 split.7z.001..004 (3 MiB stored payload, 1 MiB volumes)"
@@ -91,12 +91,12 @@ cp "$WORK"/split.7z.* "$FIX"/
 # 每个卷单独包一层 Paranoia v4（密码 123）: testdata/fixtures/split.7z.001.enc ...
 for vol in "$WORK"/split.7z.*; do
   base="$(basename "$vol")"
-  cargo run -q --manifest-path "$ROOT/Cargo.toml" -p unparanoia-core --features testkit --example make_enc -- \
+  cargo run -q --manifest-path "$ROOT/Cargo.toml" -p upzip-core --features testkit --example make_enc -- \
     "$vol" "$FIX/${base}.enc" 123
 done
 # 只有首卷的分卷族（后续卷缺失）：期望引擎明确报错而不是产出半成品。
 cp "$WORK/split.7z.001" "$WORK/truncated.7z.001"
-cargo run -q --manifest-path "$ROOT/Cargo.toml" -p unparanoia-core --features testkit --example make_enc -- \
+cargo run -q --manifest-path "$ROOT/Cargo.toml" -p upzip-core --features testkit --example make_enc -- \
   "$WORK/truncated.7z.001" "$FIX/truncated.7z.001.enc" 123
 
 rm -rf "$WORK"

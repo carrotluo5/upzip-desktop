@@ -2,7 +2,7 @@
 //!
 //! This module is gated behind the `testkit` Cargo feature and is never compiled into a
 //! shipped build: the product is a read-only decryptor. It exists so the test suites and the
-//! fixture generator (`cargo run -p unparanoia-core --features testkit --example make_enc`)
+//! fixture generator (`cargo run -p upzip-core --features testkit --example make_enc`)
 //! can create authentic containers without the original Paranoia application.
 
 use std::fs;
