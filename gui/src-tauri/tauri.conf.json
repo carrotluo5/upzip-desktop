@@ -1,10 +1,10 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Unparanoia",
-  "version": "0.3.3",
-  "identifier": "com.nanase.unparanoia",
+  "productName": "Upzip",
+  "version": "0.4.0",
+  "identifier": "com.nanase.upzip",
   "build": {
-    "beforeDevCommand": "pnpm sync:binaries && pnpm dev",
+    "beforeDevCommand": "pnpm sync:binaries && pnpm build",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "pnpm sync:binaries && pnpm build",
     "frontendDist": "../dist"
@@ -13,15 +13,14 @@
     "windows": [
       {
         "label": "main",
-        "title": "Unparanoia 解包器 — 批量解密/解压",
+        "title": "Upzip — 智能批量解压",
         "width": 1120,
         "height": 780,
         "minWidth": 880,
         "minHeight": 560,
         "resizable": true,
         "center": true,
-        "dragDropEnabled": true,
-        "backgroundColor": "#14161a"
+        "dragDropEnabled": true
       }
     ],
     "security": {
@@ -43,8 +42,8 @@
       "icons/icon.ico"
     ],
     "category": "Utility",
-    "shortDescription": "Unparanoia 文件解包 / 批量解压工具",
-    "longDescription": "解密 Paranoia File Encryption (SSEFE v4, AES-256) .enc 文件，并批量解压 zip/7z/rar 等压缩包、伪装容器与自解压文件。",
+    "shortDescription": "Upzip — 智能批量解压工具",
+    "longDescription": "批量解压 zip/7z/rar/分卷、伪装容器、自解压文件及 Paranoia (SSEFE v4) 容器。",
     "copyright": "© 2026 nanase",
     "macOS": {
       "minimumSystemVersion": "12.0"

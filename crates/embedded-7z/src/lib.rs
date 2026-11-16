@@ -3,12 +3,12 @@
 //! 背景：v0.3.0 的 Windows 便携包把 `7z.exe` / `7z.dll` 作为侧车文件放在 exe 旁边，
 //! 用户要求“只有一个 exe、不依赖任何外部文件”。本 crate 用 `include_bytes!`
 //! 把两个二进制打进调用方的可执行文件，首次运行（或缓存丢失时）解压到
-//! `%LOCALAPPDATA%\Unparanoia\embedded-7z\<版本>-<修订>`，之后复用缓存，
-//! 返回可执行文件路径给 [`unparanoia_unpack_core::SevenZip::locate`] 使用。
+//! `%LOCALAPPDATA%\Upzip\embedded-7z\<版本>-<修订>`，之后复用缓存，
+//! 返回可执行文件路径给 [`upzip_unpack_core::SevenZip::locate`] 使用。
 //!
 //! - 非 Windows 平台：函数直接返回 `Ok(None)`，不占用体积（macOS .app 仍从
 //!   `Contents/Resources/binaries/mac/7zz` 读取 7-Zip）。
-//! - 缓存目录可用环境变量 `UNPARANOIA_7Z_CACHE_DIR` 覆盖（测试/受限环境）。
+//! - 缓存目录可用环境变量 `UPZIP_7Z_CACHE_DIR` 覆盖（测试/受限环境）。
 //! - 写入采用“唯一临时文件 + rename”的原子方式，多进程同时启动不会互相踩踏。
 //!
 //! 7-Zip 以 GNU LGPL + unRAR 限制分发，许可证全文随本 crate 内嵌，
@@ -102,14 +102,14 @@ mod imp {
 
     fn cache_dir() -> Result<PathBuf, Embedded7zError> {
         let leaf = format!("{SEVEN_ZIP_VERSION}-r{CACHE_REV}");
-        if let Some(raw) = std::env::var_os("UNPARANOIA_7Z_CACHE_DIR") {
+        if let Some(raw) = std::env::var_os("UPZIP_7Z_CACHE_DIR").or_else(|| std::env::var_os("UPZIP_7Z_CACHE_DIR")) {
             if !raw.is_empty() {
                 return Ok(PathBuf::from(raw).join(leaf));
             }
         }
         if let Some(raw) = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()) {
             return Ok(PathBuf::from(raw)
-                .join("Unparanoia")
+                .join("Upzip")
                 .join("embedded-7z")
                 .join(leaf));
         }
@@ -117,7 +117,7 @@ mod imp {
         if temp.as_os_str().is_empty() {
             return Err(Embedded7zError::NoCacheDir);
         }
-        Ok(temp.join("unparanoia-embedded-7z").join(leaf))
+        Ok(temp.join("upzip-embedded-7z").join(leaf))
     }
 
     fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Embedded7zError> {

@@ -135,3 +135,49 @@ fn recovered_original_name(first_rel: Option<&Path>, output_count: usize) -> Str
     }
     String::new()
 }
+
+/// Extract the single regular-file entry of `zip_path` directly to `dest_path`
+/// without spawning an external tool. Used by the batch engine to unwrap
+/// SSEFE-encrypted split volumes in-process.
+pub fn extract_single_entry_to_path(zip_path: &Path, dest_path: &Path) -> Result<u64, DecryptError> {
+    let file = File::open(zip_path)?;
+    let mut archive = ZipArchive::new(file).map_err(|e| DecryptError::Zip(e.to_string()))?;
+    if archive.len() != 1 {
+        return Err(DecryptError::Zip(format!(
+            "expected 1 entry in archive, found {}",
+            archive.len()
+        )));
+    }
+    let mut entry = archive
+        .by_index(0)
+        .map_err(|e| DecryptError::Zip(e.to_string()))?;
+    if entry.is_dir() {
+        return Err(DecryptError::Zip(
+            "expected a regular file entry, found directory".to_string(),
+        ));
+    }
+    if let Some(parent) = dest_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    let expected_size = entry.size();
+    let parent = dest_path.parent().unwrap_or_else(|| Path::new("."));
+    let temp = util::unique_temp_path(parent, ".paranoia-enc-unwrap-");
+    let guard = util::TempGuard::new(temp.clone());
+    {
+        let mut writer = BufWriter::with_capacity(1 << 20, File::create(&temp)?);
+        io::copy(&mut entry, &mut writer)
+            .map_err(|e| DecryptError::Zip(format!("cannot unwrap entry: {e}")))?;
+        writer.flush()?;
+    }
+    let written = fs::metadata(&temp)?.len();
+    if written != expected_size {
+        return Err(DecryptError::Zip(format!(
+            "size mismatch: expected {expected_size}, got {written}"
+        )));
+    }
+    util::install_temp_file(&temp, dest_path)?;
+    guard.keep();
+    Ok(written)
+}

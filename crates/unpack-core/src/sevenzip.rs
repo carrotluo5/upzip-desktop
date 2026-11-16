@@ -194,8 +194,8 @@ impl PasswordMode {
     /// `UNPARANOIA_7Z_PW_MODE=stdin|argv` wins (legacy `UPZIP_7Z_PW_MODE` is
     /// still accepted), otherwise the platform default.
     pub fn from_env_or_platform() -> Self {
-        let mode = std::env::var("UNPARANOIA_7Z_PW_MODE")
-            .or_else(|_| std::env::var("UPZIP_7Z_PW_MODE"))
+        let mode = std::env::var("UPZIP_7Z_PW_MODE")
+            .or_else(|_| std::env::var("UNPARANOIA_7Z_PW_MODE"))
             .ok()
             .map(|s| s.trim().to_ascii_lowercase());
         match mode.as_deref() {
@@ -248,7 +248,7 @@ impl SevenZip {
             }
             searched.push(p);
         }
-        for var in ["UNPARANOIA_7Z", "UPZIP_7Z"] {
+        for var in ["UPZIP_7Z", "UNPARANOIA_7Z"] {
             if let Some(raw) = std::env::var_os(var).filter(|v| !v.is_empty()) {
                 let p = PathBuf::from(raw);
                 if p.is_file() {
@@ -478,7 +478,7 @@ impl SevenZip {
         let status = child.wait().await.map_err(|e| UpError::SevenZipFailed {
             code: -1,
             message: format!(
-                "无法等待 7-Zip 进程结束（{}）：{e}。可设置 UNPARANOIA_7Z 指向已安装的 7-Zip（7zz / 7z.exe）。",
+                "无法等待 7-Zip 进程结束（{}）：{e}。可设置 UPZIP_7Z 指向已安装的 7-Zip（7zz / 7z.exe）。",
                 self.exe.display()
             ),
         })?;
@@ -743,7 +743,7 @@ fn sevenzip_failure(exe: &Path, code: i32, text: &str) -> UpError {
         message.push_str("：");
         message.push_str(&detail);
     }
-    message.push_str("。可设置 UNPARANOIA_7Z 指向已安装的 7-Zip（7zz / 7z.exe）。");
+    message.push_str("。可设置 UPZIP_7Z 指向已安装的 7-Zip（7zz / 7z.exe）。");
     UpError::SevenZipFailed { code, message }
 }
 
@@ -751,7 +751,7 @@ fn spawn_failure(exe: &Path, err: &std::io::Error) -> UpError {
     UpError::SevenZipFailed {
         code: -1,
         message: format!(
-            "无法启动 7-Zip（{}）：{err}。可设置 UNPARANOIA_7Z 指向已安装的 7-Zip（7zz / 7z.exe）。",
+            "无法启动 7-Zip（{}）：{err}。可设置 UPZIP_7Z 指向已安装的 7-Zip（7zz / 7z.exe）。",
             exe.display()
         ),
     }
@@ -953,7 +953,7 @@ mod tests {
             "message: {msg}"
         );
         assert!(msg.contains("退出码 2"), "message: {msg}");
-        assert!(msg.contains("UNPARANOIA_7Z"), "message: {msg}");
+        assert!(msg.contains("UPZIP_7Z"), "message: {msg}");
 
         // A huge stderr tail is truncated from the front, keeping the end.
         let long = format!("PREFIX {} SUFFIX", "x".repeat(5000));
@@ -973,7 +973,7 @@ mod tests {
             msg.contains("/opt/paranoia/binaries/mac/7zz"),
             "message: {msg}"
         );
-        assert!(msg.contains("UNPARANOIA_7Z"), "message: {msg}");
+        assert!(msg.contains("UPZIP_7Z"), "message: {msg}");
     }
 
     #[test]

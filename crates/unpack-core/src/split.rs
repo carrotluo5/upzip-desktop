@@ -412,7 +412,7 @@ mod tests {
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "unparanoia-split-{tag}-{}-{}",
+            "upzip-split-{tag}-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4().simple()
         ));

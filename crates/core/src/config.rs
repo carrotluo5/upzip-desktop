@@ -22,9 +22,9 @@ use crate::error::ConfigError;
 /// File name inside the configuration directory.
 pub const CONFIG_FILE_NAME: &str = "config.json";
 /// Current configuration directory name (product name since v0.3.0).
-pub const CONFIG_DIR_NAME: &str = "unparanoia";
+pub const CONFIG_DIR_NAME: &str = "upzip";
 /// Pre-v0.3.0 configuration directory name, read only for migration.
-pub const LEGACY_CONFIG_DIR_NAME: &str = "paranoia-enc-decryptor";
+pub const LEGACY_CONFIG_DIR_NAME: &str = "unparanoia";
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct ConfigFile {
@@ -75,7 +75,7 @@ fn default_config_dir(name: &str) -> Result<PathBuf, ConfigError> {
 /// UNPARANOIA_CONFIG_DIR overrides everything; the pre-v0.3.0 PARANOIA_ENC_CONFIG_DIR is
 /// honoured as a fallback for old scripts.
 pub fn config_dir() -> Result<PathBuf, ConfigError> {
-    for key in ["UNPARANOIA_CONFIG_DIR", "PARANOIA_ENC_CONFIG_DIR"] {
+    for key in ["UPZIP_CONFIG_DIR", "UNPARANOIA_CONFIG_DIR", "PARANOIA_ENC_CONFIG_DIR"] {
         if let Some(override_dir) = std::env::var_os(key) {
             if !override_dir.is_empty() {
                 return Ok(PathBuf::from(override_dir));
@@ -267,7 +267,7 @@ mod tests {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let dir = std::env::temp_dir().join(format!(
-            "unparanoia-core-test-config-{tag}-{}-{nanos}",
+            "upzip-core-test-config-{tag}-{}-{nanos}",
             std::process::id()
         ));
         fs::create_dir_all(&dir).unwrap();

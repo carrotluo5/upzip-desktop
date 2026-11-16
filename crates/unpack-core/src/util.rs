@@ -314,7 +314,7 @@ pub fn now_secs() -> u64 {
 }
 
 pub fn data_dir() -> PathBuf {
-    for var in ["UNPARANOIA_DATA_DIR", "PARANOIA_DATA_DIR", "UPZIP_DATA_DIR"] {
+    for var in ["UPZIP_DATA_DIR", "UNPARANOIA_DATA_DIR", "PARANOIA_DATA_DIR"] {
         if let Ok(p) = std::env::var(var) {
             if !p.trim().is_empty() {
                 return PathBuf::from(p);
@@ -323,7 +323,7 @@ pub fn data_dir() -> PathBuf {
     }
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("unparanoia")
+        .join("upzip")
 }
 
 /// Guard for `std::fs` calls that carry a path for context.

@@ -37,6 +37,9 @@ struct PasswordHit {
     /// 1-based position in the candidate pool (drives `TaskPasswordAttempt.tried`
     /// and the "使用候选密码 #N 成功" warning).
     tried: usize,
+    /// Derived SSEFE keys cached during `find_ssefe_password` so decryption
+    /// does not run Argon2id a second time.
+    ssefe_keys: Option<upzip_core::Keys>,
 }
 
 /// Build the ordered, de-duplicated password candidate pool for one archive
@@ -52,6 +55,7 @@ fn password_candidates(cfg: &RunConfig, det: &Detection) -> Vec<PasswordHit> {
             source: "config".to_string(),
             password: password.clone(),
             tried: 0,
+            ssefe_keys: None,
         });
     }
     for hint in &det.hints {
@@ -59,6 +63,7 @@ fn password_candidates(cfg: &RunConfig, det: &Detection) -> Vec<PasswordHit> {
             source: "hint".to_string(),
             password: hint.clone(),
             tried: 0,
+            ssefe_keys: None,
         });
     }
     if cfg.try_empty_password {
@@ -66,6 +71,7 @@ fn password_candidates(cfg: &RunConfig, det: &Detection) -> Vec<PasswordHit> {
             source: "empty".to_string(),
             password: String::new(),
             tried: 0,
+            ssefe_keys: None,
         });
     }
     let mut seen: HashSet<String> = HashSet::new();
@@ -1315,7 +1321,7 @@ impl Engine {
     ) -> Result<(Option<PasswordHit>, usize)> {
         let cands = password_candidates(&self.cfg, det);
         let mut tried = 0usize;
-        for cand in cands {
+        for mut cand in cands {
             if !wait_pause_or_cancel(gate, cancel).await {
                 return Err(UpError::Cancelled);
             }
@@ -1323,31 +1329,33 @@ impl Engine {
             let input = path.to_path_buf();
             let password = cand.password.clone();
             let check =
-                tokio::task::spawn_blocking(move || ssefe::verify_password(&input, &password))
+                tokio::task::spawn_blocking(move || ssefe::verify_password_keys(&input, &password))
                     .await;
-            let ok = match check {
-                Ok(Ok(accepted)) => accepted,
+            let matched_keys = match check {
+                Ok(Ok(keys)) => keys,
                 Ok(Err(SsefeError::Cancelled)) => return Err(UpError::Cancelled),
                 Ok(Err(e)) => {
                     emit(TaskEvent::Log {
                         line: format!("密码校验失败：{}", e.message()),
                     });
-                    false
+                    None
                 }
                 Err(e) => {
                     emit(TaskEvent::Log {
                         line: format!("密码校验任务失败：{e}"),
                     });
-                    false
+                    None
                 }
             };
+            let ok = matched_keys.is_some();
             emit(TaskEvent::TaskPasswordAttempt {
                 id,
                 source: cand.source.clone(),
                 ok,
                 tried,
             });
-            if ok {
+            if let Some(keys) = matched_keys {
+                cand.ssefe_keys = Some(keys);
                 return Ok((Some(cand), tried));
             }
         }
@@ -1531,7 +1539,16 @@ impl Engine {
         if !wait_pause_or_cancel(gate, cancel).await {
             return Err(SsefeError::Cancelled);
         }
-        match ssefe::decrypt_to_temp(id, input, &first.password, staging_parent, cancel, emit).await
+        match ssefe::decrypt_to_temp_with_keys(
+            id,
+            input,
+            &first.password,
+            first.ssefe_keys.clone(),
+            staging_parent,
+            cancel,
+            emit,
+        )
+        .await
         {
             Ok(path) => return Ok((first, path)),
             Err(SsefeError::Cancelled) => return Err(SsefeError::Cancelled),
@@ -1667,9 +1684,15 @@ impl Engine {
                             });
                         }
                     };
-                    ssefe::decrypt_to_path(
+                    let reused_keys = if index == 0 {
+                        hit.ssefe_keys.clone()
+                    } else {
+                        None
+                    };
+                    ssefe::decrypt_to_path_with_keys(
                         &volume.path,
                         &hit.password,
+                        reused_keys,
                         &wrapper_path,
                         cancel,
                         &mut on_percent,
@@ -1679,7 +1702,7 @@ impl Engine {
                 match result {
                     Ok(()) => {
                         match self
-                            .unwrap_volume_zip(&wrapper_path, &plain_path, volumes_dir, cancel)
+                            .unwrap_volume_zip(&wrapper_path, &plain_path, cancel)
                             .await
                         {
                             Ok(()) => {}
@@ -1716,61 +1739,34 @@ impl Engine {
     }
 
     /// Unwrap the single-entry ZIP produced by `decrypt_to_archive` into the raw
-    /// volume file. Split families need the raw `.001`-style file names on disk
-    /// so 7-Zip can locate the remaining volumes.
+    /// volume file in-process (no 7-Zip subprocess needed). Split families need
+    /// the raw `.001`-style file names on disk so 7-Zip can locate all volumes.
     async fn unwrap_volume_zip(
         &self,
         wrapper: &Path,
         plain_path: &Path,
-        work_dir: &Path,
         cancel: &CancelToken,
     ) -> std::result::Result<(), SsefeError> {
         let _guard = TempGuard(Some(wrapper.to_path_buf()));
-        let sub = work_dir.join(format!(
-            "{}unwrap-{}",
-            crate::TMP_PREFIX,
-            Uuid::new_v4().simple()
-        ));
-        if let Err(error) = fs::create_dir_all(&sub) {
-            let _ = remove_path(&sub);
-            return Err(SsefeError::Io(format!(
-                "无法创建 {}：{error}",
-                sub.display()
-            )));
+        if cancel.is_cancelled() {
+            return Err(SsefeError::Cancelled);
         }
-        let extracted = self
-            .sz
-            .extract(wrapper, None, &sub, cancel, &mut |_| {})
-            .await;
-        match extracted {
-            Ok(_) => {}
-            Err(UpError::Cancelled) => {
-                let _ = remove_path(&sub);
-                return Err(SsefeError::Cancelled);
-            }
-            Err(error) => {
-                let _ = remove_path(&sub);
-                return Err(SsefeError::Other(format!(
-                    "无法解析解密后的分卷 {}：{error}",
-                    wrapper.display()
-                )));
-            }
-        }
-        let mut entries: Vec<PathBuf> = fs::read_dir(&sub)
-            .map(|rd| rd.flatten().map(|entry| entry.path()).collect())
-            .unwrap_or_default();
-        entries.sort();
-        if entries.len() != 1 {
-            let count = entries.len();
-            let _ = remove_path(&sub);
-            return Err(SsefeError::Other(format!(
-                "解密后的分卷 {} 内含 {count} 个条目（预期 1 个）",
+        let wrapper_owned = wrapper.to_path_buf();
+        let plain_owned = plain_path.to_path_buf();
+        let res = tokio::task::spawn_blocking(move || {
+            upzip_core::extract_single_entry_to_path(&wrapper_owned, &plain_owned)
+        })
+        .await;
+        match res {
+            Ok(Ok(_written)) => Ok(()),
+            Ok(Err(error)) => Err(SsefeError::Other(format!(
+                "无法解析解密后的分卷 {}：{error}",
                 wrapper.display()
-            )));
+            ))),
+            Err(join_err) => Err(SsefeError::Other(format!(
+                "解包分卷线程异常终止：{join_err}"
+            ))),
         }
-        let moved = crate::util::move_path(&entries[0], plain_path);
-        let _ = remove_path(&sub);
-        moved.map_err(|error| SsefeError::Io(format!("无法写入 {}：{error}", plain_path.display())))
     }
 
     /// List the plaintext archive produced by SSEFE decryption and unlock its
@@ -1964,7 +1960,7 @@ mod tests {
     #[test]
     fn scrub_removes_symlinks_and_keeps_regular_files() {
         let dir = std::env::temp_dir().join(format!(
-            "unparanoia-scrub-{}",
+            "upzip-scrub-{}",
             uuid::Uuid::new_v4().simple()
         ));
         std::fs::create_dir_all(dir.join("sub")).unwrap();
@@ -1996,6 +1992,7 @@ mod tests {
             source: "config".to_string(),
             password: "x".to_string(),
             tried,
+            ssefe_keys: None,
         }
     }
 
@@ -2066,7 +2063,7 @@ mod tests {
     #[tokio::test]
     async fn non_first_volume_is_skipped_with_hint() {
         let dir = std::env::temp_dir().join(format!(
-            "unparanoia-split-skip-{}",
+            "upzip-split-skip-{}",
             uuid::Uuid::new_v4().simple()
         ));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2120,7 +2117,7 @@ mod tests {
             return;
         };
         let dir = std::env::temp_dir().join(format!(
-            "unparanoia-split-e2e-{}",
+            "upzip-split-e2e-{}",
             uuid::Uuid::new_v4().simple()
         ));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2196,7 +2193,7 @@ mod tests {
             return;
         };
         let dir = std::env::temp_dir().join(format!(
-            "unparanoia-split-missing-{}",
+            "upzip-split-missing-{}",
             uuid::Uuid::new_v4().simple()
         ));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2262,7 +2259,7 @@ mod tests {
             return;
         };
         let dir = std::env::temp_dir().join(format!(
-            "unparanoia-nested-split-{}",
+            "upzip-nested-split-{}",
             uuid::Uuid::new_v4().simple()
         ));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2344,7 +2341,7 @@ mod tests {
             return;
         };
         let dir = std::env::temp_dir().join(format!(
-            "unparanoia-ssefe-split-{}",
+            "upzip-ssefe-split-{}",
             uuid::Uuid::new_v4().simple()
         ));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2380,7 +2377,7 @@ mod tests {
         for volume in &volumes {
             let name = volume.file_name().unwrap().to_string_lossy().to_string();
             let encrypted = dir.join(format!("{name}.enc"));
-            unparanoia_core::testkit::write_enc_file(volume, &encrypted, "outer-secret", 0x00)
+            upzip_core::testkit::write_enc_file(volume, &encrypted, "outer-secret", 0x00)
                 .expect("build SSEFE volume");
         }
         for volume in &volumes {
@@ -2451,7 +2448,7 @@ mod tests {
             return;
         };
         let dir = std::env::temp_dir().join(format!(
-            "unparanoia-processed-gate-{}",
+            "upzip-processed-gate-{}",
             uuid::Uuid::new_v4().simple()
         ));
         std::fs::create_dir_all(&dir).unwrap();

@@ -1,7 +1,7 @@
-//! unparanoia-cli: unified batch decrypt/extract CLI.
+//! upzip-cli: unified batch decrypt/extract CLI.
 //!
 //! Legacy (0.1.1) usage is preserved:
-//!   unparanoia-cli a.enc b.enc -p PASSWORD -o out [--json] [--inspect]
+//!   upzip-cli a.enc b.enc -p PASSWORD -o out [--json] [--inspect]
 //!
 //! New subcommands (a bare path list is equivalent to "run"):
 //!   run PATH... [flags]                 batch decrypt/extract
@@ -10,7 +10,7 @@
 //!   config [--show|--path|--list-passwords|--add-password PW|--remove-password IDX]
 //!          [--set-password PW|--clear-password|--clear-passwords]
 //!   doctor [--sevenzip PATH]            environment self-check
-//!   cleanup-staging [--root DIR]...     remove .unparanoia-tmp-* leftovers
+//!   cleanup-staging [--root DIR]...     remove .upzip-tmp-* leftovers
 //!   --licenses                          print the embedded 7-Zip license text
 //!
 //! Processed-fingerprint skipping is opt-in: pass `--skip-processed` to skip files
@@ -27,15 +27,15 @@ use std::sync::{Arc, Mutex};
 
 use clap::{Args, Parser};
 
-use unparanoia_core::config::{
+use upzip_core::config::{
     add_password as add_stored_password, clear_passwords, config_dir, config_file_path,
     load_passwords, remove_password_at, save_passwords,
 };
-use unparanoia_core::{
+use upzip_core::{
     default_output_dir, inspect_file, parse_argon2_params, BatchSummary, FileOutcome,
 };
-use unparanoia_embedded_7z::{ensure_7z as ensure_embedded_7z, LICENSE_TEXT, SEVEN_ZIP_VERSION};
-use unparanoia_unpack_core::{
+use upzip_embedded_7z::{ensure_7z as ensure_embedded_7z, LICENSE_TEXT, SEVEN_ZIP_VERSION};
+use upzip_unpack_core::{
     archive_stem, expand_inputs, run_batch, util::human_bytes, CancelToken, ConflictPolicy,
     Detection, Engine, FileKind, LayoutPolicy, PasswordState, PauseGate, ProcessedStore, RunConfig,
     Settings, SevenZip, Sink, Summary, TaskEvent, TaskOutcome, TaskStatus, MAX_NESTED_DEPTH,
@@ -75,7 +75,7 @@ async fn dispatch(args: &[String]) -> i32 {
             EXIT_OK
         }
         Some("-V") | Some("--version") => {
-            println!("unparanoia-cli {}", env!("CARGO_PKG_VERSION"));
+            println!("upzip-cli {}", env!("CARGO_PKG_VERSION"));
             EXIT_OK
         }
         Some("--licenses") => {
@@ -88,22 +88,22 @@ async fn dispatch(args: &[String]) -> i32 {
 
 fn print_help() {
     println!(
-        "unparanoia-cli {} - 统一批量解密/解压 CLI",
+        "upzip-cli {} - 统一批量解密/解压 CLI",
         env!("CARGO_PKG_VERSION")
     );
     println!();
     println!("用法：");
-    println!("  unparanoia-cli [FILES...] [选项]          旧式用法：直接批量处理（等价 run）");
-    println!("  unparanoia-cli run [PATH...] [选项]       批量解密/解压文件与目录");
-    println!("  unparanoia-cli detect PATH... [--json]    识别类型、容器与加密状态");
-    println!("  unparanoia-cli inspect FILE... [--json]   打印 .enc 明文头信息");
-    println!("  unparanoia-cli config [选项]              查看/管理明文密码库（默认掩码显示）");
-    println!("  unparanoia-cli doctor [--sevenzip PATH]   环境自检（7-Zip、配置目录、detect）");
-    println!("  unparanoia-cli cleanup-staging [--root DIR]...");
-    println!("                                              清理 .unparanoia-tmp-* 残留");
-    println!("  unparanoia-cli --version");
+    println!("  upzip-cli [FILES...] [选项]          旧式用法：直接批量处理（等价 run）");
+    println!("  upzip-cli run [PATH...] [选项]       批量解密/解压文件与目录");
+    println!("  upzip-cli detect PATH... [--json]    识别类型、容器与加密状态");
+    println!("  upzip-cli inspect FILE... [--json]   打印 .enc 明文头信息");
+    println!("  upzip-cli config [选项]              查看/管理明文密码库（默认掩码显示）");
+    println!("  upzip-cli doctor [--sevenzip PATH]   环境自检（7-Zip、配置目录、detect）");
+    println!("  upzip-cli cleanup-staging [--root DIR]...");
+    println!("                                              清理 .upzip-tmp-* 残留");
+    println!("  upzip-cli --version");
     println!(
-        "  unparanoia-cli --licenses                 打印内嵌 7-Zip 许可证（LGPL + unRAR 限制）"
+        "  upzip-cli --licenses                 打印内嵌 7-Zip 许可证（LGPL + unRAR 限制）"
     );
     println!();
     println!("旧式兼容选项：-p/--password、-o/--output-dir、--conflict、--json、--inspect、");
@@ -119,9 +119,9 @@ fn print_help() {
     println!("            才按 processed.json 指纹跳过已成功处理过的文件。");
     println!();
     println!("退出码：0 成功/跳过；1 有失败或缺少密码；2 用法/配置/环境错误；130 已取消");
-    println!("环境变量：UNPARANOIA_PASSWORD（密码；兼容 PARANOIA_ENC_PASSWORD）、");
-    println!("          UNPARANOIA_7Z（7-Zip 路径）、UNPARANOIA_CONFIG_DIR（配置目录）");
-    println!("各子命令详情：unparanoia-cli <子命令> --help");
+    println!("环境变量：UPZIP_PASSWORD（密码；兼容 PARANOIA_ENC_PASSWORD）、");
+    println!("          UPZIP_7Z（7-Zip 路径）、UPZIP_CONFIG_DIR（配置目录）");
+    println!("各子命令详情：upzip-cli <子命令> --help");
 }
 
 fn print_licenses() {
@@ -136,7 +136,7 @@ fn print_licenses() {
 
 fn argv_for(args: &[String]) -> Vec<String> {
     let mut argv = Vec::with_capacity(args.len() + 1);
-    argv.push("unparanoia-cli".to_string());
+    argv.push("upzip-cli".to_string());
     argv.extend(args.iter().cloned());
     argv
 }
@@ -331,7 +331,7 @@ fn add_password(list: &mut Vec<String>, candidate: &str) {
 
 /// Environment password. The new name wins; the 0.1.x name is a fallback.
 fn env_password() -> Option<String> {
-    for name in ["UNPARANOIA_PASSWORD", "PARANOIA_ENC_PASSWORD"] {
+    for name in ["UPZIP_PASSWORD", "UPZIP_PASSWORD", "PARANOIA_ENC_PASSWORD"] {
         if let Ok(value) = std::env::var(name) {
             if !value.is_empty() {
                 return Some(value);
@@ -419,13 +419,13 @@ fn build_sevenzip(explicit: Option<PathBuf>) -> Result<SevenZip, i32> {
         .map_err(|message| {
             eprintln!("错误：{message}");
             eprintln!(
-                "提示：安装 7-Zip 后把 7zz/7z.exe 加入 PATH，或设置环境变量 UNPARANOIA_7Z 指向可执行文件。"
+                "提示：安装 7-Zip 后把 7zz/7z.exe 加入 PATH，或设置环境变量 UPZIP_7Z 指向可执行文件。"
             );
             EXIT_USAGE
         })
 }
 
-/// Resolve 7-Zip in priority order: explicit `--sevenzip` > `UNPARANOIA_7Z` /
+/// Resolve 7-Zip in priority order: explicit `--sevenzip` > `UPZIP_7Z` /
 /// `UPZIP_7Z` environment variable (only when it points at an existing file) >
 /// the runtime embedded into the Windows single-file build (no-op on macOS/Linux) >
 /// the regular `SevenZip::locate` automatic search (app dir, bundled binaries/,
@@ -467,7 +467,7 @@ fn resolve_sevenzip(explicit: Option<PathBuf>) -> Result<SevenZipChoice, String>
 }
 
 fn finish_sevenzip_resolution(
-    resolved: unparanoia_unpack_core::Result<SevenZip>,
+    resolved: upzip_unpack_core::Result<SevenZip>,
     explicit: &Option<PathBuf>,
     embedded: Option<&Path>,
 ) -> Result<SevenZipChoice, String> {
@@ -479,9 +479,9 @@ fn finish_sevenzip_resolution(
         .map_err(|error| error.to_string())
 }
 
-/// First non-empty `UNPARANOIA_7Z` / `UPZIP_7Z` that points at an existing file.
+/// First non-empty `UPZIP_7Z` / `UPZIP_7Z` that points at an existing file.
 fn env_sevenzip_path() -> Option<PathBuf> {
-    for var in ["UNPARANOIA_7Z", "UPZIP_7Z"] {
+    for var in ["UPZIP_7Z", "UPZIP_7Z"] {
         if let Some(raw) = std::env::var_os(var).filter(|value| !value.is_empty()) {
             let path = PathBuf::from(raw);
             if path.is_file() {
@@ -640,7 +640,7 @@ fn legacy_conflict_target(outcome: &TaskOutcome) -> String {
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "unparanoia-cli",
+    name = "upzip-cli",
     version,
     about = "Decrypt Paranoia File Encryption v4 (.enc) files and unpack archives (legacy mode)"
 )]
@@ -649,7 +649,7 @@ struct LegacyCli {
     #[arg(value_name = "FILES")]
     files: Vec<PathBuf>,
 
-    /// Password, repeatable (also UNPARANOIA_PASSWORD / saved password library)
+    /// Password, repeatable (also UPZIP_PASSWORD / saved password library)
     #[arg(short = 'p', long = "password", value_name = "PASSWORD")]
     passwords: Vec<String>,
 
@@ -707,13 +707,13 @@ async fn cmd_legacy(args: &[String]) -> i32 {
 
     if cli.files.is_empty() {
         eprintln!("error: no input files given");
-        eprintln!("提示：运行 unparanoia-cli --help 查看用法");
+        eprintln!("提示：运行 upzip-cli --help 查看用法");
         return EXIT_USAGE;
     }
 
     let passwords = resolve_passwords(&cli.passwords);
     if passwords.is_empty() && inputs_look_encrypted(&cli.files) {
-        eprintln!("error: no password given (use -p/--password or UNPARANOIA_PASSWORD)");
+        eprintln!("error: no password given (use -p/--password or UPZIP_PASSWORD)");
         return EXIT_USAGE;
     }
 
@@ -739,7 +739,7 @@ async fn cmd_legacy(args: &[String]) -> i32 {
     // global processed.json so a later new-style batch or GUI run does not
     // silently skip files the user just decrypted through the legacy interface.
     let legacy_processed =
-        std::env::temp_dir().join(format!("unparanoia-cli-legacy-{}.json", std::process::id()));
+        std::env::temp_dir().join(format!("upzip-cli-legacy-{}.json", std::process::id()));
     cfg.processed_path = Some(legacy_processed.clone());
     if let Err(message) = apply_run_flags(&mut cfg, &cli.flags) {
         eprintln!("error: {message}");
@@ -1049,7 +1049,7 @@ struct RunCli {
     #[arg(value_name = "PATH")]
     inputs: Vec<PathBuf>,
 
-    /// Password, repeatable (also UNPARANOIA_PASSWORD / saved password library)
+    /// Password, repeatable (also UPZIP_PASSWORD / saved password library)
     #[arg(short = 'p', long = "password", value_name = "PASSWORD")]
     passwords: Vec<String>,
 
@@ -1063,7 +1063,7 @@ async fn cmd_run(args: &[String]) -> i32 {
         Err(code) => return code,
     };
     if cli.inputs.is_empty() {
-        eprintln!("错误：请提供要处理的文件或目录（用法：unparanoia-cli run PATH...）");
+        eprintln!("错误：请提供要处理的文件或目录（用法：upzip-cli run PATH...）");
         return EXIT_USAGE;
     }
 
@@ -1281,7 +1281,7 @@ async fn cmd_detect(args: &[String]) -> i32 {
     let cancel = CancelToken::new();
     let mut failures = 0usize;
     for path in &cli.paths {
-        match unparanoia_unpack_core::detect(&sevenzip, path, &cancel).await {
+        match upzip_unpack_core::detect(&sevenzip, path, &cancel).await {
             Ok(detection) => {
                 if cli.json {
                     match serde_json::to_string(&detection) {
@@ -1666,7 +1666,7 @@ async fn cmd_doctor(args: &[String]) -> i32 {
         Err(code) => return code,
     };
     let mut ok = true;
-    println!("unparanoia-cli {}", env!("CARGO_PKG_VERSION"));
+    println!("upzip-cli {}", env!("CARGO_PKG_VERSION"));
     println!("平台：{} {}", std::env::consts::OS, std::env::consts::ARCH);
 
     match config_dir() {
@@ -1719,7 +1719,7 @@ async fn cmd_doctor(args: &[String]) -> i32 {
             ok = false;
             println!("7-Zip：未找到（{error}）");
             println!(
-                "提示：设置环境变量 UNPARANOIA_7Z 指向 7zz/7z.exe，或把 7zz/7z.exe 放到应用同目录。"
+                "提示：设置环境变量 UPZIP_7Z 指向 7zz/7z.exe，或把 7zz/7z.exe 放到应用同目录。"
             );
             None
         }
@@ -1727,12 +1727,12 @@ async fn cmd_doctor(args: &[String]) -> i32 {
 
     if let Some(sevenzip) = sevenzip {
         let temp =
-            std::env::temp_dir().join(format!("unparanoia-cli-doctor-{}.bin", std::process::id()));
+            std::env::temp_dir().join(format!("upzip-cli-doctor-{}.bin", std::process::id()));
         let mut self_check_ok = false;
-        match std::fs::write(&temp, b"unparanoia-cli doctor self-check\n") {
+        match std::fs::write(&temp, b"upzip-cli doctor self-check\n") {
             Ok(()) => {
                 let cancel = CancelToken::new();
-                match unparanoia_unpack_core::detect(&sevenzip, &temp, &cancel).await {
+                match upzip_unpack_core::detect(&sevenzip, &temp, &cancel).await {
                     Ok(detection) => {
                         println!("detect 自检：通过（kind={}）", kind_name(&detection.kind));
                         self_check_ok = true;
@@ -1762,7 +1762,7 @@ async fn cmd_doctor(args: &[String]) -> i32 {
 // ---------------------------------------------------------------------------
 
 #[derive(Parser, Debug)]
-#[command(name = "cleanup-staging", about = "清理 .unparanoia-tmp-* 残留")]
+#[command(name = "cleanup-staging", about = "清理 .upzip-tmp-* 残留")]
 struct CleanupCli {
     /// Directories to scan (default: current directory), repeatable
     #[arg(long = "root", value_name = "DIR")]
@@ -1824,7 +1824,7 @@ fn cmd_cleanup(args: &[String]) -> i32 {
         eprintln!("错误：没有可清理的目录");
         return EXIT_USAGE;
     }
-    println!("共清理 {removed} 个 .unparanoia-tmp-* 残留（失败 {failed} 个）");
+    println!("共清理 {removed} 个 .upzip-tmp-* 残留（失败 {failed} 个）");
     if failed == 0 {
         EXIT_OK
     } else {

@@ -58,9 +58,9 @@ impl ProcessedStore {
     /// `<config dir>/processed.json`, with a temp-dir fallback when the platform
     /// configuration directory is unavailable.
     pub fn default_path() -> PathBuf {
-        match unparanoia_core::config::config_dir() {
+        match upzip_core::config::config_dir() {
             Ok(dir) => dir.join(PROCESSED_FILE_NAME),
-            Err(_) => std::env::temp_dir().join(format!("unparanoia-{PROCESSED_FILE_NAME}")),
+            Err(_) => std::env::temp_dir().join(format!("upzip-{PROCESSED_FILE_NAME}")),
         }
     }
 

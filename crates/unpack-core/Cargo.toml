@@ -1,5 +1,5 @@
 [package]
-name = "unparanoia-unpack-core"
+name = "upzip-unpack-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,7 +16,7 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 regex = { workspace = true }
 dirs = { workspace = true }
-unparanoia-core = { workspace = true }
+upzip-core = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -24,4 +24,4 @@ libc = "0.2"
 [dev-dependencies]
 tempfile = { workspace = true }
 # testkit feature builds authentic Paranoia v4 containers for end-to-end tests.
-unparanoia-core = { workspace = true, features = ["testkit"] }
+upzip-core = { workspace = true, features = ["testkit"] }

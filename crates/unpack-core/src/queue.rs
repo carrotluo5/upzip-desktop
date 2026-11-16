@@ -277,7 +277,7 @@ mod tests {
     #[tokio::test]
     async fn processed_file_is_only_saved_when_skip_is_enabled() {
         let dir = std::env::temp_dir().join(format!(
-            "unparanoia-queue-processed-{}",
+            "upzip-queue-processed-{}",
             uuid::Uuid::new_v4().simple()
         ));
         fs::create_dir_all(&dir).unwrap();

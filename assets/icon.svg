@@ -1,66 +1,68 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0.4" y2="1">
-      <stop offset="0" stop-color="#3D97FF"/>
-      <stop offset="0.55" stop-color="#1470F0"/>
-      <stop offset="1" stop-color="#0640B4"/>
+    <linearGradient id="bgGrad" x1="160" y1="80" x2="864" y2="960" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#3B82F6"/>
+      <stop offset="48%" stop-color="#1D4ED8"/>
+      <stop offset="100%" stop-color="#1E1B4B"/>
     </linearGradient>
-    <linearGradient id="flapL" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#FFFFFF"/>
-      <stop offset="1" stop-color="#D8E8FF"/>
+    <linearGradient id="glossGrad" x1="512" y1="32" x2="512" y2="540" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
     </linearGradient>
-    <linearGradient id="flapR" x1="1" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#FFFFFF"/>
-      <stop offset="1" stop-color="#CFE1FF"/>
+    <linearGradient id="arrowGrad" x1="512" y1="220" x2="512" y2="610" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="55%" stop-color="#BAE6FD"/>
+      <stop offset="100%" stop-color="#38BDF8"/>
     </linearGradient>
-    <linearGradient id="boxFace" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#FFFFFF"/>
-      <stop offset="0.72" stop-color="#F4F8FF"/>
-      <stop offset="1" stop-color="#DCE9FF"/>
+    <linearGradient id="boxLeft" x1="290" y1="480" x2="512" y2="790" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#E0F2FE"/>
     </linearGradient>
-    <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#FFE07A"/>
-      <stop offset="0.5" stop-color="#FFC53D"/>
-      <stop offset="1" stop-color="#E89A00"/>
+    <linearGradient id="boxRight" x1="512" y1="480" x2="734" y2="790" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#BAE6FD"/>
+      <stop offset="100%" stop-color="#38BDF8"/>
     </linearGradient>
-    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="18" stdDeviation="26" flood-color="#001F5C" flood-opacity="0.35"/>
+    <linearGradient id="flapLeft" x1="240" y1="450" x2="495" y2="585" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#E0F2FE"/>
+    </linearGradient>
+    <linearGradient id="flapRight" x1="529" y1="450" x2="784" y2="585" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#E0F2FE"/>
+      <stop offset="100%" stop-color="#7DD3FC"/>
+    </linearGradient>
+    <filter id="softShadow" x="-15%" y="-15%" width="130%" height="135%">
+      <feDropShadow dx="0" dy="22" stdDeviation="24" flood-color="#090D24" flood-opacity="0.38"/>
+    </filter>
+    <filter id="arrowShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#0C4A6E" flood-opacity="0.35"/>
     </filter>
   </defs>
-  <!-- app tile -->
-  <rect x="32" y="32" width="960" height="960" rx="228" fill="url(#bg)"/>
-  <rect x="32" y="32" width="960" height="960" rx="228" fill="none" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="6"/>
-  <!-- open box lid flaps -->
+
+  <!-- macOS Squircle Base -->
+  <rect x="32" y="32" width="960" height="960" rx="220" ry="220" fill="url(#bgGrad)"/>
+  <path d="M 252 32 H 772 C 893.5 32 992 130.5 992 252 V 440 C 780 510 244 510 32 440 V 252 C 32 130.5 130.5 32 252 32 Z" fill="url(#glossGrad)"/>
+  <rect x="34" y="34" width="956" height="956" rx="218" ry="218" fill="none" stroke="#FFFFFF" stroke-opacity="0.16" stroke-width="4"/>
+
+  <!-- Archive Box Group -->
   <g filter="url(#softShadow)">
-    <polygon points="352,470 180,318 400,268 486,466" fill="url(#flapL)"/>
-    <polygon points="672,470 844,318 624,268 538,466" fill="url(#flapR)"/>
+    <!-- Back Inner Lid -->
+    <path d="M 310 368 L 502 292 C 510 289 518 290 524 295 L 552 320 L 310 432 Z" fill="#7DD3FC" opacity="0.88"/>
+    <!-- Inner Cavity -->
+    <polygon points="310,432 512,356 714,432 512,516" fill="#0F295C"/>
+    <!-- Front Left Face -->
+    <polygon points="310,432 512,516 512,776 310,680" fill="url(#boxLeft)"/>
+    <!-- Vertical Ribbon Accent on Left Face -->
+    <polygon points="384,463 426,480 426,735 384,715" fill="#7DD3FC" opacity="0.72"/>
+    <!-- Front Right Face -->
+    <polygon points="512,516 714,432 714,680 512,776" fill="url(#boxRight)"/>
+    <!-- Front Left Open Flap -->
+    <path d="M 310 432 L 508 514 L 448 594 C 443 600 435 602 428 599 L 252 522 C 244 518 242 508 248 501 Z" fill="url(#flapLeft)"/>
+    <!-- Front Right Open Flap -->
+    <path d="M 714 432 L 516 514 L 576 594 C 581 600 589 602 596 599 L 772 522 C 780 518 782 508 776 501 Z" fill="url(#flapRight)"/>
   </g>
-  <!-- box interior -->
-  <rect x="300" y="452" width="424" height="150" rx="32" fill="#0A2C70"/>
-  <!-- box body -->
-  <g filter="url(#softShadow)">
-    <rect x="286" y="462" width="452" height="368" rx="42" fill="url(#boxFace)"/>
-  </g>
-  <!-- box front seam -->
-  <rect x="286" y="566" width="452" height="16" fill="#C9DBFA" opacity="0.55"/>
-  <!-- zipper teeth on the front seam -->
-  <g fill="#7FA8E8">
-    <rect x="330" y="566" width="26" height="16" rx="7"/>
-    <rect x="392" y="566" width="26" height="16" rx="7"/>
-    <rect x="454" y="566" width="26" height="16" rx="7"/>
-    <rect x="516" y="566" width="26" height="16" rx="7"/>
-    <rect x="578" y="566" width="26" height="16" rx="7"/>
-    <rect x="640" y="566" width="26" height="16" rx="7"/>
-  </g>
-  <!-- keyhole plate -->
-  <circle cx="512" cy="680" r="58" fill="#0A2C70"/>
-  <path d="M512 664 a22 22 0 0 1 22 22 c0 9 -5 16 -12 20 l10 44 h-40 l10 -44 c-7 -4 -12 -11 -12 -20 a22 22 0 0 1 22 -22 z" fill="#FFFFFF"/>
-  <!-- open padlock overlapping bottom right -->
-  <g transform="rotate(-8 700 760)">
-    <path d="M648 742 v-38 a52 52 0 0 1 104 0" fill="none" stroke="url(#gold)" stroke-width="26" stroke-linecap="round"/>
-    <rect x="608" y="736" width="184" height="150" rx="32" fill="url(#gold)"/>
-    <circle cx="700" cy="792" r="24" fill="#7A4A00"/>
-    <rect x="688" y="800" width="24" height="48" rx="12" fill="#7A4A00"/>
-    <rect x="608" y="736" width="184" height="150" rx="32" fill="none" stroke="#B26F00" stroke-opacity="0.4" stroke-width="5"/>
+
+  <!-- Upward Extraction Arrow -->
+  <g filter="url(#arrowShadow)">
+    <path d="M 512 222 L 614 342 C 620 349 615 360 605 360 H 552 V 454 C 552 484 532 506 512 514 C 492 506 472 484 472 454 V 360 H 419 C 409 360 404 349 410 342 Z" fill="url(#arrowGrad)"/>
   </g>
 </svg>

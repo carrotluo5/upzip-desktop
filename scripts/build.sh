@@ -71,7 +71,7 @@ pnpm --dir "${ROOT_DIR}/gui" tauri build
 
 # ---- 5. CLI release 二进制 ----------------------------------------------
 log "构建 CLI（release，产品交付件）"
-cargo build --release -p unparanoia-cli
+cargo build --release -p upzip-cli
 
 # ---- 6. 产物清单 ---------------------------------------------------------
 BUNDLE_DIR="${ROOT_DIR}/target/release/bundle"
@@ -96,12 +96,12 @@ fi
 if [[ -x "${BIN_DIR}/unparanoia" ]]; then
   found=1
   printf '  %8s  %s\n         sha256 %s\n' "$(human_size "${BIN_DIR}/unparanoia")" \
-    "target/release/unparanoia" "$(sha256_of "${BIN_DIR}/unparanoia")"
+    "target/release/upzip" "$(sha256_of "${BIN_DIR}/unparanoia")"
 fi
-if [[ -x "${BIN_DIR}/unparanoia-cli" ]]; then
+if [[ -x "${BIN_DIR}/upzip-cli" ]]; then
   found=1
-  printf '  %8s  %s\n         sha256 %s\n' "$(human_size "${BIN_DIR}/unparanoia-cli")" \
-    "target/release/unparanoia-cli" "$(sha256_of "${BIN_DIR}/unparanoia-cli")"
+  printf '  %8s  %s\n         sha256 %s\n' "$(human_size "${BIN_DIR}/upzip-cli")" \
+    "target/release/upzip-cli" "$(sha256_of "${BIN_DIR}/upzip-cli")"
 fi
 [[ "${found}" -eq 1 ]] || warn "未找到 bundle 产物，请检查上面的构建日志"
 

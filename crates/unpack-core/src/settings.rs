@@ -102,7 +102,7 @@ impl Default for Settings {
 impl Settings {
     /// `<config dir>/settings.json`, or `None` when the platform config dir is unavailable.
     pub fn path() -> Option<PathBuf> {
-        unparanoia_core::config::config_dir()
+        upzip_core::config::config_dir()
             .ok()
             .map(|dir| dir.join(SETTINGS_FILE_NAME))
     }
@@ -116,7 +116,7 @@ impl Settings {
     pub fn load() -> Self {
         let new_path = Self::path();
         let legacy_path =
-            unparanoia_core::config::legacy_config_dir().map(|dir| dir.join(SETTINGS_FILE_NAME));
+            upzip_core::config::legacy_config_dir().map(|dir| dir.join(SETTINGS_FILE_NAME));
         Self::load_with_paths(new_path.as_deref(), legacy_path.as_deref())
     }
 
@@ -215,7 +215,7 @@ mod tests {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let dir = std::env::temp_dir().join(format!(
-            "unparanoia-unpack-settings-{tag}-{}-{nanos}",
+            "upzip-unpack-settings-{tag}-{}-{nanos}",
             std::process::id()
         ));
         fs::create_dir_all(&dir).unwrap();

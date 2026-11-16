@@ -4093,8 +4093,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
-name = "unparanoia"
-version = "0.3.3"
+name = "upzip"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4102,27 +4102,27 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tokio",
- "unparanoia-core",
- "unparanoia-embedded-7z",
- "unparanoia-unpack-core",
+ "upzip-core",
+ "upzip-embedded-7z",
+ "upzip-unpack-core",
 ]
 
 [[package]]
-name = "unparanoia-cli"
-version = "0.3.3"
+name = "upzip-cli"
+version = "0.4.0"
 dependencies = [
  "clap",
  "serde",
  "serde_json",
  "tokio",
- "unparanoia-core",
- "unparanoia-embedded-7z",
- "unparanoia-unpack-core",
+ "upzip-core",
+ "upzip-embedded-7z",
+ "upzip-unpack-core",
 ]
 
 [[package]]
-name = "unparanoia-core"
-version = "0.3.3"
+name = "upzip-core"
+version = "0.4.0"
 dependencies = [
  "aes",
  "argon2",
@@ -4140,15 +4140,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "unparanoia-embedded-7z"
-version = "0.3.3"
+name = "upzip-embedded-7z"
+version = "0.4.0"
 dependencies = [
  "thiserror 2.0.21",
 ]
 
 [[package]]
-name = "unparanoia-unpack-core"
-version = "0.3.3"
+name = "upzip-unpack-core"
+version = "0.4.0"
 dependencies = [
  "dirs 6.0.0",
  "hex",
@@ -4160,7 +4160,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
- "unparanoia-core",
+ "upzip-core",
  "uuid",
 ]
 

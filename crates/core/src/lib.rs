@@ -26,8 +26,9 @@ mod fixture;
 
 pub use batch::{run_batch, BatchOptions, BatchProgress, BatchSummary, FileOutcome};
 pub use decrypt::{
-    decrypt_file, decrypt_to_archive, inspect_file, validate_input_path, verify_password,
-    DecryptArchiveReport, DecryptOptions, DecryptReport,
+    decrypt_file, decrypt_to_archive, decrypt_to_archive_with_keys, inspect_file,
+    validate_input_path, verify_password, verify_password_keys, DecryptArchiveReport,
+    DecryptOptions, DecryptReport,
 };
 pub use config::{
     add_password, clear_passwords, clear_remembered_password, config_dir, config_file_path,
@@ -42,3 +43,4 @@ pub use format::{
 };
 pub use kdf::{derive_keys, derive_l0_password_hash, Keys};
 pub use output::{default_output_dir, resolve_output_dir, ConflictStrategy};
+pub use zip_extract::extract_single_entry_to_path;

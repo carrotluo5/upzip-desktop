@@ -1,4 +1,4 @@
-//! unparanoia-unpack-core: detection + smart extraction engine for archives,
+//! upzip-unpack-core: detection + smart extraction engine for archives,
 //! masked archives, self-extracting executables and Paranoia File Encryption v4
 //! (`SSEFE`) containers. UI-agnostic; driven by the CLI or the Tauri app.
 
@@ -31,4 +31,4 @@ pub use types::*;
 
 /// Name prefix of staging folders/files. Cleaned up on the next run by
 /// `cleanup-staging` (CLI) and matched by the GUI's `stagingPrefix` app info.
-pub const TMP_PREFIX: &str = ".unparanoia-tmp-";
+pub const TMP_PREFIX: &str = ".upzip-tmp-";

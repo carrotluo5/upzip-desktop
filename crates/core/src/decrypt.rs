@@ -18,6 +18,7 @@
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::crypto::{constant_time_eq, CtrStream, MacAccumulator};
 use crate::error::{AddFileError, DecryptError};
@@ -145,8 +146,22 @@ fn decrypt_stream(
     out: &Path,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<u64, DecryptError> {
-    let (mut file, header, params, ciphertext_len) = read_container(input)?;
+    let (_file, header, params, _ciphertext_len) = read_container(input)?;
     let keys = kdf::derive_keys(password, &header.salt, &params)?;
+    decrypt_stream_with_keys(input, &keys, out, None, progress)
+}
+
+fn decrypt_stream_with_keys(
+    input: &Path,
+    keys: &kdf::Keys,
+    out: &Path,
+    cancel: Option<&AtomicBool>,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<u64, DecryptError> {
+    if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+        return Err(DecryptError::Cancelled);
+    }
+    let (mut file, header, _params, ciphertext_len) = read_container(input)?;
 
     let guard = util::TempGuard::new(out.to_path_buf());
     file.seek(SeekFrom::Start(PREFIX_LEN))?;
@@ -163,6 +178,9 @@ fn decrypt_stream(
     let mut processed: u64 = 0;
     let mut strip_checkcode = true;
     while processed < ciphertext_len {
+        if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            return Err(DecryptError::Cancelled);
+        }
         let want = std::cmp::min(CHUNK_SIZE as u64, ciphertext_len - processed) as usize;
         reader.read_exact(&mut buffer[..want])?;
         mac.update(&buffer[..want]);
@@ -226,12 +244,40 @@ pub fn decrypt_to_archive(
     })
 }
 
+/// Variant of [`decrypt_to_archive`] that reuses keys already derived by
+/// [`verify_password_keys`] and supports cooperative cancellation via `cancel`.
+pub fn decrypt_to_archive_with_keys(
+    input: &Path,
+    keys: &kdf::Keys,
+    out_zip: &Path,
+    cancel: Option<&AtomicBool>,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<DecryptArchiveReport, DecryptError> {
+    if let Some(parent) = out_zip.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    let archive_bytes = decrypt_stream_with_keys(input, keys, out_zip, cancel, progress)?;
+    Ok(DecryptArchiveReport {
+        input: input.to_path_buf(),
+        archive: out_zip.to_path_buf(),
+        archive_bytes,
+    })
+}
+
 /// Cheap password probe: derive the keys and check the 32-byte plaintext checkcode only.
 ///
 /// `Ok(())` means the password is correct with overwhelming probability (false positive is
 /// about 36^-32). It does not authenticate the whole ciphertext; global integrity is checked by
 /// [`decrypt_to_archive`] / [`decrypt_file`].
 pub fn verify_password(input: &Path, password: &str) -> Result<(), DecryptError> {
+    verify_password_keys(input, password).map(|_| ())
+}
+
+/// Same as [`verify_password`], returning the derived [`kdf::Keys`] so the caller can
+/// pass them straight into [`decrypt_to_archive_with_keys`] without running Argon2id twice.
+pub fn verify_password_keys(input: &Path, password: &str) -> Result<kdf::Keys, DecryptError> {
     let (mut file, header, params, _ciphertext_len) = read_container(input)?;
     let keys = kdf::derive_keys(password, &header.salt, &params)?;
     file.seek(SeekFrom::Start(PREFIX_LEN))?;
@@ -241,7 +287,7 @@ pub fn verify_password(input: &Path, password: &str) -> Result<(), DecryptError>
     if !util::is_valid_checkcode(&buffer) {
         return Err(DecryptError::WrongPassword);
     }
-    Ok(())
+    Ok(keys)
 }
 
 /// Decrypt one file. `progress` receives (processed ciphertext bytes, total ciphertext bytes).
@@ -257,7 +303,7 @@ pub fn decrypt_file(
     }
 
     fs::create_dir_all(&opts.output_dir)?;
-    let temp_zip = util::unique_temp_path(&opts.output_dir, ".unparanoia-enc-decrypt-");
+    let temp_zip = util::unique_temp_path(&opts.output_dir, ".upzip-enc-decrypt-");
     let temp_guard = util::TempGuard::new(temp_zip.clone());
 
     decrypt_stream(input, password, &temp_zip, progress)?;
@@ -285,7 +331,7 @@ mod tests {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let dir = std::env::temp_dir().join(format!(
-            "unparanoia-enc-test-decrypt-{tag}-{}-{nanos}",
+            "upzip-enc-test-decrypt-{tag}-{}-{nanos}",
             std::process::id()
         ));
         fs::create_dir_all(&dir).unwrap();
@@ -612,6 +658,40 @@ mod tests {
             decrypt_to_archive(&input, "456", &out_zip, &mut |_, _| {}).is_err()
         );
         assert!(!out_zip.exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn decrypt_to_archive_with_keys_reuses_keys_and_respects_cancel() {
+        let dir = temp_dir("with-keys");
+        let input = dir.join("sample.enc");
+        fs::write(
+            &input,
+            make_enc_file("pw", &test_salt(16), 0x00, &[("hello.txt", b"reused keys")]),
+        )
+        .unwrap();
+        let keys = verify_password_keys(&input, "pw").expect("keys");
+
+        let out_zip = dir.join("ok.zip");
+        let cancel = AtomicBool::new(false);
+        let report =
+            decrypt_to_archive_with_keys(&input, &keys, &out_zip, Some(&cancel), &mut |_, _| {})
+                .expect("decrypt with keys");
+        assert!(report.archive_bytes > 0);
+        assert!(out_zip.exists());
+
+        let cancelled_zip = dir.join("cancelled.zip");
+        cancel.store(true, Ordering::Relaxed);
+        let err = decrypt_to_archive_with_keys(
+            &input,
+            &keys,
+            &cancelled_zip,
+            Some(&cancel),
+            &mut |_, _| {},
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), "cancelled");
+        assert!(!cancelled_zip.exists());
         fs::remove_dir_all(&dir).unwrap();
     }
 }

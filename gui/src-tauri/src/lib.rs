@@ -12,7 +12,7 @@
 //!     serialized exactly as the engine emits it (tag = `type`, snake_case);
 //!   - `unparanoia://done` — the final `Summary` of the batch.
 //!
-//! The password store is kept in plain text by `unparanoia_core::config`
+//! The password store is kept in plain text by `upzip_core::config`
 //! (0600 on unix). Passwords are never logged.
 
 use std::fs::OpenOptions;
@@ -26,25 +26,25 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
-use unparanoia_core::config::{
+use upzip_core::config::{
     add_password as core_add_password, clear_passwords as core_clear_passwords, config_dir,
     config_file_path, load_passwords as core_load_passwords,
     remove_password_at as core_remove_password_at,
 };
-use unparanoia_unpack_core as unpack;
-use unparanoia_unpack_core::{
+use upzip_unpack_core as unpack;
+use upzip_unpack_core::{
     expand_inputs, run_batch, CancelToken, Detection, Engine, PauseGate, ProcessedStore, Settings,
     SevenZip, Sink, Summary, TaskEvent, TaskStatus, TMP_PREFIX,
 };
 
-pub const EVENT_TASK: &str = "unparanoia://event";
-pub const EVENT_DONE: &str = "unparanoia://done";
+pub const EVENT_TASK: &str = "upzip://event";
+pub const EVENT_DONE: &str = "upzip://done";
 
 /// Sub-directory of the configuration directory that holds the persistent log.
 const LOG_DIR_NAME: &str = "logs";
 /// Persistent GUI log file name; rotated to unparanoia.log.1 once it grows
 /// past LOG_MAX_BYTES.
-const LOG_FILE_NAME: &str = "unparanoia.log";
+const LOG_FILE_NAME: &str = "upzip.log";
 /// Log rotation threshold (2 MiB); exactly one previous file is kept.
 const LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -126,11 +126,11 @@ impl Drop for RunningGuard<'_> {
 
 fn locate_sevenzip() -> Result<SevenZipInfo, String> {
     // Priority matches the CLI: explicit --sevenzip (the GUI has none) >
-    // UNPARANOIA_7Z / UPZIP_7Z environment override > embedded 7-Zip >
+    // UPZIP_7Z / UPZIP_7Z environment override > embedded 7-Zip >
     // automatic search. SevenZip::locate(None) already honours the two env
     // vars, so when one points at a real file we must not pass the embedded
     // path: an explicit path is checked before the env vars and would win.
-    let env_override = ["UNPARANOIA_7Z", "UPZIP_7Z"].iter().any(|variable| {
+    let env_override = ["UPZIP_7Z", "UPZIP_7Z"].iter().any(|variable| {
         std::env::var_os(variable)
             .filter(|value| !value.is_empty())
             .map(|value| PathBuf::from(value).is_file())
@@ -143,17 +143,17 @@ fn locate_sevenzip() -> Result<SevenZipInfo, String> {
         // binary; ensure_7z() materializes them into %LOCALAPPDATA% and returns
         // the path. On macOS it returns None and SevenZip::locate falls back to
         // the bundled Resources/binaries/mac/7zz or an installed 7-Zip.
-        match unparanoia_embedded_7z::ensure_7z() {
+        match upzip_embedded_7z::ensure_7z() {
             Ok(path) => path,
             Err(error) => {
-                eprintln!("[unparanoia-gui] 内嵌 7-Zip 初始化失败，回退外部 7-Zip：{error}");
+                eprintln!("[upzip-gui] 内嵌 7-Zip 初始化失败，回退外部 7-Zip：{error}");
                 None
             }
         }
     };
     let sz = SevenZip::locate(embedded).map_err(|error| {
         format!(
-            "找不到 7-Zip（{error}）。请安装 7-Zip，或设置环境变量 UNPARANOIA_7Z 指向 7zz/7z.exe，\
+            "找不到 7-Zip（{error}）。请安装 7-Zip，或设置环境变量 UPZIP_7Z 指向 7zz/7z.exe，\
              或把二进制放到应用的 binaries/ 目录。"
         )
     })?;
@@ -175,7 +175,7 @@ fn log_dir() -> PathBuf {
         Ok(dir) => dir.join(LOG_DIR_NAME),
         // A broken config dir must not disable logging entirely: fall back to
         // the same temporary location the processed store uses.
-        Err(_) => std::env::temp_dir().join("unparanoia-logs"),
+        Err(_) => std::env::temp_dir().join("upzip-logs"),
     }
 }
 
@@ -252,7 +252,7 @@ fn try_append_log_line(line: &str) -> std::io::Result<()> {
 /// Best-effort log write used outside command handlers: never fails the caller.
 fn append_log_line(line: &str) {
     if let Err(error) = try_append_log_line(line) {
-        eprintln!("[unparanoia-gui] 写日志失败：{error}");
+        eprintln!("[upzip-gui] 写日志失败：{error}");
     }
 }
 
@@ -343,7 +343,7 @@ fn describe_task_event(event: &TaskEvent) -> String {
 
 /// Where the resolved 7-Zip binary probably came from (log only).
 fn seven_zip_source(info: &SevenZipInfo) -> String {
-    for variable in ["UNPARANOIA_7Z", "UPZIP_7Z"] {
+    for variable in ["UPZIP_7Z", "UPZIP_7Z"] {
         if let Some(value) = std::env::var_os(variable).filter(|value| !value.is_empty()) {
             if PathBuf::from(value) == info.exe {
                 return format!("环境变量 {variable}");
@@ -511,7 +511,7 @@ fn start_batch(
         let mut settings = lock(&state.settings);
         *settings = req.settings.clone();
         if let Err(error) = settings.save() {
-            eprintln!("[unparanoia-gui] 启动前保存设置失败：{error}");
+            eprintln!("[upzip-gui] 启动前保存设置失败：{error}");
             append_log_line(&format!("启动前保存设置失败：{error}"));
         }
     }
@@ -557,7 +557,7 @@ fn start_batch(
             }
         }
         Err(error) => {
-            eprintln!("[unparanoia-gui] 读取密码库失败：{error}");
+            eprintln!("[upzip-gui] 读取密码库失败：{error}");
             append_log_line(&format!("读取密码库失败：{error}"));
         }
     }
@@ -597,14 +597,14 @@ fn start_batch(
 
     let gate = state.gate.clone();
     eprintln!(
-        "[unparanoia-gui] 开始批量任务：{total} 个文件（进程启动后 {} ms）",
+        "[upzip-gui] 开始批量任务：{total} 个文件（进程启动后 {} ms）",
         state.started_at.elapsed().as_millis()
     );
 
     let handle = app.clone();
     let recover = app.clone();
     std::thread::Builder::new()
-        .name("unparanoia-batch".into())
+        .name("upzip-batch".into())
         .spawn(move || {
             // Outer safety net: even if the worker panics outside the run_batch
             // catch (e.g. while persisting state) the UI still receives done and
@@ -700,7 +700,7 @@ fn run_batch_thread(
     ));
     let settings = lock(&state.settings).clone();
     if let Err(error) = settings.save() {
-        eprintln!("[unparanoia-gui] 批量结束后保存设置失败：{error}");
+        eprintln!("[upzip-gui] 批量结束后保存设置失败：{error}");
         append_log_line(&format!("批量结束后保存设置失败：{error}"));
     }
     let _ = handle.emit(EVENT_DONE, &summary);
@@ -747,11 +747,23 @@ fn settings_get(state: State<'_, AppState>) -> Settings {
     lock(&state.settings).clone()
 }
 
+fn apply_window_theme(app: &AppHandle, theme: &unpack::settings::ThemeMode) {
+    if let Some(win) = app.get_webview_window("main") {
+        let target = match theme {
+            unpack::settings::ThemeMode::Light => Some(tauri::Theme::Light),
+            unpack::settings::ThemeMode::Dark => Some(tauri::Theme::Dark),
+            unpack::settings::ThemeMode::System => None,
+        };
+        let _ = win.set_theme(target);
+    }
+}
+
 #[tauri::command]
-fn settings_set(state: State<'_, AppState>, settings: Settings) -> Result<(), String> {
+fn settings_set(app: AppHandle, state: State<'_, AppState>, settings: Settings) -> Result<(), String> {
     settings
         .save()
         .map_err(|error| format!("保存设置失败：{error}"))?;
+    apply_window_theme(&app, &settings.theme);
     *lock(&state.settings) = settings;
     Ok(())
 }
@@ -762,7 +774,7 @@ fn list_passwords() -> Vec<String> {
     match core_load_passwords() {
         Ok(passwords) => passwords,
         Err(error) => {
-            eprintln!("[unparanoia-gui] 读取密码库失败：{error}");
+            eprintln!("[upzip-gui] 读取密码库失败：{error}");
             Vec::new()
         }
     }
@@ -786,7 +798,7 @@ fn clear_passwords() -> Result<(), String> {
 /// 7-Zip 许可证全文（LGPL 2.1 + unRAR 限制），设置页“查看许可证”入口使用。
 #[tauri::command]
 fn seven_zip_license() -> String {
-    unparanoia_embedded_7z::LICENSE_TEXT.to_string()
+    upzip_embedded_7z::LICENSE_TEXT.to_string()
 }
 
 #[tauri::command]
@@ -1060,7 +1072,7 @@ fn forget_processed(state: State<'_, AppState>) -> Result<usize, String> {
         .map(|value| count_processed_records(&value))
         .unwrap_or(0);
     std::fs::remove_file(&path).map_err(|error| format!("删除处理记录失败：{error}"))?;
-    eprintln!("[unparanoia-gui] 已清除处理记录 {count} 条");
+    eprintln!("[upzip-gui] 已清除处理记录 {count} 条");
     Ok(count)
 }
 
@@ -1074,7 +1086,7 @@ pub fn run() {
             let sevenzip = match locate_sevenzip() {
                 Ok(info) => Some(info),
                 Err(error) => {
-                    eprintln!("[unparanoia-gui] {error}");
+                    eprintln!("[upzip-gui] {error}");
                     None
                 }
             };
@@ -1084,10 +1096,10 @@ pub fn run() {
             // prevent the window from opening, so failures only go to stderr.
             match settings.save() {
                 Ok(()) => {}
-                Err(error) => eprintln!("[unparanoia-gui] 启动时保存设置失败：{error}"),
+                Err(error) => eprintln!("[upzip-gui] 启动时保存设置失败：{error}"),
             }
             if let Err(error) = std::fs::create_dir_all(log_dir()) {
-                eprintln!("[unparanoia-gui] 无法创建日志目录：{error}");
+                eprintln!("[upzip-gui] 无法创建日志目录：{error}");
             }
             // Cold-start "Open With" arguments. Tauri/macOS injects flags such
             // as `-psn_0_...`; anything starting with '-' is not a file.
@@ -1123,6 +1135,7 @@ pub fn run() {
                 None => append_log_line("7-Zip：启动时未找到（首次批量任务时会重试）"),
             }
             append_log_line(&format!("启动文件参数：{} 个", startup_paths.len()));
+            apply_window_theme(app.handle(), &settings.theme);
             app.manage(AppState::new(sevenzip, settings, startup_paths));
             Ok(())
         })
@@ -1154,7 +1167,7 @@ pub fn run() {
         ]);
 
     if let Err(error) = builder.run(tauri::generate_context!()) {
-        eprintln!("[unparanoia-gui] 应用启动失败：{error}");
+        eprintln!("[upzip-gui] 应用启动失败：{error}");
         std::process::exit(1);
     }
 }

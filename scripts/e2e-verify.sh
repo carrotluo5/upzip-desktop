@@ -19,8 +19,8 @@ cd "${ROOT}"
 
 FIX="${ROOT}/testdata/fixtures"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/unparanoia-e2e.XXXXXX")"
-export UNPARANOIA_CONFIG_DIR="${TMP}/config"
-mkdir -p "${UNPARANOIA_CONFIG_DIR}"
+export UPZIP_CONFIG_DIR="${TMP}/config"
+mkdir -p "${UPZIP_CONFIG_DIR}"
 
 cleanup() { rm -rf "${TMP}"; }
 trap cleanup EXIT
@@ -61,8 +61,8 @@ for f in ${REQUIRED_FIXTURES}; do
   [[ -f "${FIX}/${f}" ]] || { echo "缺少 fixture ${f}" >&2; exit 2; }
 done
 
-cargo build -q -p unparanoia-cli --bin unparanoia-cli
-CLI="${ROOT}/target/debug/unparanoia-cli"
+cargo build -q -p upzip-cli --bin upzip-cli
+CLI="${ROOT}/target/debug/upzip-cli"
 [[ -x "${CLI}" ]] || { echo "CLI 未构建: ${CLI}" >&2; exit 2; }
 
 run_cli() { # run_cli <args...>; captures OUT/ERR/RC
@@ -72,7 +72,7 @@ run_cli() { # run_cli <args...>; captures OUT/ERR/RC
   set -e
   ERR="$(cat "${TMP}/stderr.txt")"
 }
-RESET_CONFIG() { rm -rf "${UNPARANOIA_CONFIG_DIR}"; mkdir -p "${UNPARANOIA_CONFIG_DIR}"; }
+RESET_CONFIG() { rm -rf "${UPZIP_CONFIG_DIR}"; mkdir -p "${UPZIP_CONFIG_DIR}"; }
 
 echo
 echo "== 1. 基础命令"
@@ -122,7 +122,7 @@ OUTDIR="${TMP}/out-sample"
 run_cli run "${FIX}/sample.enc" -p 123 -o "${OUTDIR}" --no-skip-processed
 check "run sample.enc" 0 "${RC}"
 assert_sha "sample.enc -> hello.txt 内容" "${OUTDIR}/hello.txt" "${HELLO_SHA}"
-if find "${OUTDIR}" -name '.unparanoia-tmp-*' | grep -q .; then fail "sample.enc 残留 staging 目录"; else pass "无 staging 残留"; fi
+if find "${OUTDIR}" -name '.upzip-tmp-*' | grep -q .; then fail "sample.enc 残留 staging 目录"; else pass "无 staging 残留"; fi
 
 echo
 echo "== 4. 嵌套级联（nested.enc -> nested.zip -> nested-inner.zip -> hello.txt）"
@@ -252,8 +252,8 @@ run_cli config --show
 check "config --show（密码库）" 0 "${RC}"
 printf '%s\n%s\n' "${OUT}" "${ERR}" > "${TMP}/cfg-show.txt"
 contains "config --show 显示密码库数量" "${TMP}/cfg-show.txt" "密码库：1 个"
-if [[ -f "${UNPARANOIA_CONFIG_DIR}/config.json" ]]; then pass "密码库文件已创建"; else fail "密码库文件未创建"; fi
-if [[ "$(stat -f '%Lp' "${UNPARANOIA_CONFIG_DIR}/config.json" 2>/dev/null)" == "600" ]]; then pass "config.json 权限 0600"; else fail "config.json 权限不是 0600"; fi
+if [[ -f "${UPZIP_CONFIG_DIR}/config.json" ]]; then pass "密码库文件已创建"; else fail "密码库文件未创建"; fi
+if [[ "$(stat -f '%Lp' "${UPZIP_CONFIG_DIR}/config.json" 2>/dev/null)" == "600" ]]; then pass "config.json 权限 0600"; else fail "config.json 权限不是 0600"; fi
 
 OUTDIR="${TMP}/out-lib"
 run_cli run "${FIX}/sample.enc" -o "${OUTDIR}" --no-skip-processed
@@ -273,10 +273,10 @@ contains "config --clear-passwords 提示已清空" "${TMP}/cfg-clear.txt" "已�
 
 STAGE_ROOT="${TMP}/stage"
 mkdir -p "${STAGE_ROOT}"
-touch "${STAGE_ROOT}/.unparanoia-tmp-abc123.zip" "${STAGE_ROOT}/.unparanoia-tmp-def456.zip" "${STAGE_ROOT}/keep.txt"
+touch "${STAGE_ROOT}/.upzip-tmp-abc123.zip" "${STAGE_ROOT}/.upzip-tmp-def456.zip" "${STAGE_ROOT}/keep.txt"
 run_cli cleanup-staging --root "${STAGE_ROOT}"
 check "cleanup-staging" 0 "${RC}"
-if [[ -e "${STAGE_ROOT}/.unparanoia-tmp-abc123.zip" ]]; then fail "cleanup-staging 未删除残留"; else pass "cleanup-staging 删除残留"; fi
+if [[ -e "${STAGE_ROOT}/.upzip-tmp-abc123.zip" ]]; then fail "cleanup-staging 未删除残留"; else pass "cleanup-staging 删除残留"; fi
 if [[ -f "${STAGE_ROOT}/keep.txt" ]]; then pass "cleanup-staging 保留非残留文件"; else fail "cleanup-staging 误删 keep.txt"; fi
 
 echo
@@ -359,7 +359,7 @@ assert len(s) == 1 and s[0]["success"] == 1 and s[0]["skipped"] == 0, s
 assert len(o) == 1 and o[0]["status"] == "success", o
 PY
 then pass "默认第 2 次 run 仍 success=1（默认不按历史跳过）"; else fail "默认第 2 次 run 被跳过"; fi
-if [[ ! -e "${UNPARANOIA_CONFIG_DIR}/processed.json" ]]; then
+if [[ ! -e "${UPZIP_CONFIG_DIR}/processed.json" ]]; then
   pass "默认配置跑完不生成 processed.json"
 else
   fail "默认配置跑完却生成了 processed.json"
@@ -370,7 +370,7 @@ RESET_CONFIG
 OUTDIR="${TMP}/out-skip-optin"
 run_cli run "${FIX}/sample.enc" -p 123 -o "${OUTDIR}" --skip-processed --json
 check "--skip-processed 第 1 次 exit 0" 0 "${RC}"
-if [[ -f "${UNPARANOIA_CONFIG_DIR}/processed.json" ]]; then
+if [[ -f "${UPZIP_CONFIG_DIR}/processed.json" ]]; then
   pass "--skip-processed 第 1 次写入 processed.json"
 else
   fail "--skip-processed 第 1 次未写入 processed.json"
@@ -411,7 +411,7 @@ PY
 then pass "分卷 related_paths 含 ${SPLIT_VOL_COUNT} 个 .enc 卷路径"; else fail "分卷 related_paths 断言失败"; fi
 
 # ④ 清除 processed.json 后，默认 run 应重新成功处理。
-rm -f "${UNPARANOIA_CONFIG_DIR}/processed.json"
+rm -f "${UPZIP_CONFIG_DIR}/processed.json"
 OUTDIR="${TMP}/out-skip-cleared"
 run_cli run "${FIX}/sample.enc" -p 123 -o "${OUTDIR}" --json
 check "清除 processed.json 后默认 run exit 0" 0 "${RC}"

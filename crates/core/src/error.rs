@@ -35,6 +35,8 @@ pub enum DecryptError {
     InvalidOutputName(String),
     #[error("crypto error: {0}")]
     Crypto(String),
+    #[error("decryption cancelled")]
+    Cancelled,
 }
 
 impl DecryptError {
@@ -55,6 +57,7 @@ impl DecryptError {
             DecryptError::OutputExists(_) => "outputExists",
             DecryptError::InvalidOutputName(_) => "invalidOutputName",
             DecryptError::Crypto(_) => "crypto",
+            DecryptError::Cancelled => "cancelled",
         }
     }
 }

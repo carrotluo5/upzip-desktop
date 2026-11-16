@@ -1,7 +1,7 @@
 //! Generate a Paranoia v4 `.enc` fixture from an existing file.
 //!
 //! Usage:
-//!   cargo run -p unparanoia-core --features testkit --example make_enc -- \
+//!   cargo run -p upzip-core --features testkit --example make_enc -- \
 //!       <input-file> <output.enc> <password> [customParamsHex]
 //!
 //! `customParamsHex` defaults to `00` (t=10, m=10240 KiB, p=4), which is fast enough for tests.
@@ -38,7 +38,7 @@ fn main() -> ExitCode {
         0x00
     };
 
-    match unparanoia_core::testkit::write_enc_file(&input, &output, password, custom_params) {
+    match upzip_core::testkit::write_enc_file(&input, &output, password, custom_params) {
         Ok(()) => {
             let size = std::fs::metadata(&output).map(|meta| meta.len()).unwrap_or(0);
             println!("wrote {} ({} bytes, customParams=0x{custom_params:02x})", output.display(), size);

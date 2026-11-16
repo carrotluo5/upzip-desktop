@@ -6,7 +6,7 @@
 //! * decrypt a container to a temporary inner ZIP (`decrypt_to_temp`) that the normal
 //!   7-Zip list/plan/extract pipeline can consume.
 //!
-//! This is the only module that talks to `unparanoia_core`; everything above works on
+//! This is the only module that talks to `upzip_core`; everything above works on
 //! the returned plain values.
 //!
 //! Security note: the decrypted plaintext ZIP is written to a `TMP_PREFIX`-named file next
@@ -15,12 +15,12 @@
 //! `cleanup-staging` sweep on the next run.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use unparanoia_core::error::DecryptError;
-use unparanoia_core::format::{
+use upzip_core::error::DecryptError;
+use upzip_core::format::{
     parse_argon2_params, parse_header, ALGORITHM_AES_256, FORMAT_VERSION, HEADER_LEN, MAGIC,
     SALT_LEN,
 };
@@ -125,7 +125,7 @@ pub enum SsefeError {
 }
 
 impl SsefeError {
-    /// Stable machine readable kind (mirrors `unparanoia_core::DecryptError::kind`).
+    /// Stable machine readable kind (mirrors `upzip_core::DecryptError::kind`).
     pub fn kind(&self) -> &'static str {
         match self {
             SsefeError::Cancelled => "cancelled",
@@ -180,6 +180,7 @@ impl From<DecryptError> for SsefeError {
             ),
             DecryptError::WrongPassword => SsefeError::WrongPassword,
             DecryptError::Integrity => SsefeError::Integrity,
+            DecryptError::Cancelled => SsefeError::Cancelled,
             other => SsefeError::Other(other.to_string()),
         }
     }
@@ -189,9 +190,22 @@ impl From<DecryptError> for SsefeError {
 /// Errors other than `WrongPassword` (bad/truncated container) are propagated so the
 /// engine can distinguish "no candidate matched" from "the file itself is broken".
 pub fn verify_password(input: &Path, password: &str) -> Result<bool, SsefeError> {
-    match unparanoia_core::verify_password(input, password) {
+    match upzip_core::verify_password(input, password) {
         Ok(()) => Ok(true),
         Err(DecryptError::WrongPassword) => Ok(false),
+        Err(error) => Err(SsefeError::from(error)),
+    }
+}
+
+/// Same as [`verify_password`], returning `Ok(Some(keys))` on match so the
+/// engine can reuse the derived Argon2id keys for the subsequent decryption.
+pub fn verify_password_keys(
+    input: &Path,
+    password: &str,
+) -> Result<Option<upzip_core::Keys>, SsefeError> {
+    match upzip_core::verify_password_keys(input, password) {
+        Ok(keys) => Ok(Some(keys)),
+        Err(DecryptError::WrongPassword) => Ok(None),
         Err(error) => Err(SsefeError::from(error)),
     }
 }
@@ -199,7 +213,7 @@ pub fn verify_password(input: &Path, password: &str) -> Result<bool, SsefeError>
 /// Length of the Paranoia v4 plaintext checkcode that precedes the inner ZIP.
 const PLAINTEXT_CHECKCODE_LEN: usize = 32;
 
-/// Normalize the archive produced by `unparanoia_core::decrypt_to_archive`.
+/// Normalize the archive produced by `upzip_core::decrypt_to_archive`.
 ///
 /// The core currently writes the *whole* plaintext, whose first 32 bytes are the
 /// `[a-z0-9]` checkcode, so the inner ZIP starts at offset 32. 7-Zip refuses a ZIP with a
@@ -292,6 +306,19 @@ pub async fn decrypt_to_path(
     cancel: &CancelToken,
     on_percent: &mut (dyn FnMut(u8) + Send),
 ) -> Result<(), SsefeError> {
+    decrypt_to_path_with_keys(input, password, None, out_path, cancel, on_percent).await
+}
+
+/// Decrypt `input` into `out_path`, reusing `keys` if already derived by
+/// [`verify_password_keys`], and aborting cooperatively via `cancel`.
+pub async fn decrypt_to_path_with_keys(
+    input: &Path,
+    password: &str,
+    keys: Option<upzip_core::Keys>,
+    out_path: &Path,
+    cancel: &CancelToken,
+    on_percent: &mut (dyn FnMut(u8) + Send),
+) -> Result<(), SsefeError> {
     if cancel.is_cancelled() {
         return Err(SsefeError::Cancelled);
     }
@@ -304,23 +331,31 @@ pub async fn decrypt_to_path(
 
     let processed = Arc::new(AtomicU64::new(0));
     let total = Arc::new(AtomicU64::new(0));
+    let cancel_flag = Arc::new(AtomicBool::new(false));
     let processed_cb = Arc::clone(&processed);
     let total_cb = Arc::clone(&total);
+    let cancel_cb = Arc::clone(&cancel_flag);
     let input_owned = input.to_path_buf();
     let password_owned = password.to_string();
     let out_owned = out_path.to_path_buf();
 
     let mut handle = tokio::task::spawn_blocking(move || {
-        unparanoia_core::decrypt_to_archive(
+        let mut on_progress = |done: u64, total_bytes: u64| {
+            processed_cb.store(done, Ordering::Relaxed);
+            if total_bytes > 0 {
+                total_cb.store(total_bytes, Ordering::Relaxed);
+            }
+        };
+        let keys = match keys {
+            Some(k) => k,
+            None => upzip_core::verify_password_keys(&input_owned, &password_owned)?,
+        };
+        upzip_core::decrypt_to_archive_with_keys(
             &input_owned,
-            &password_owned,
+            &keys,
             &out_owned,
-            &mut |done, total_bytes| {
-                processed_cb.store(done, Ordering::Relaxed);
-                if total_bytes > 0 {
-                    total_cb.store(total_bytes, Ordering::Relaxed);
-                }
-            },
+            Some(cancel_cb.as_ref()),
+            &mut on_progress,
         )
         .map(|_report| ())
     });
@@ -332,7 +367,7 @@ pub async fn decrypt_to_path(
                 break joined;
             }
             _ = cancel.wait_cancelled() => {
-                // 阻塞解密无法真正中断：等它结束，保证半成品明文不会留在磁盘上。
+                cancel_flag.store(true, Ordering::Relaxed);
                 let _ = handle.await;
                 return Err(SsefeError::Cancelled);
             }
@@ -365,13 +400,26 @@ pub async fn decrypt_to_path(
 /// `staging_parent` (or the system temp dir) and return its path.
 ///
 /// Progress is reported as `TaskEvent::TaskProgress` (percent 0..=100) in the `decrypt`
-/// stage. The core decryption has no cancellation entry point, so cancelling waits for the
-/// blocking worker to finish and then removes the partial plaintext before returning
+/// stage. Cancelling sets the cooperative abort flag so the blocking worker stops at
+/// the next chunk boundary and removes the partial plaintext before returning
 /// `SsefeError::Cancelled`.
 pub async fn decrypt_to_temp(
     id: u64,
     input: &Path,
     password: &str,
+    staging_parent: Option<&Path>,
+    cancel: &CancelToken,
+    emit: &mut (dyn FnMut(TaskEvent) + Send),
+) -> Result<PathBuf, SsefeError> {
+    decrypt_to_temp_with_keys(id, input, password, None, staging_parent, cancel, emit).await
+}
+
+/// Variant of [`decrypt_to_temp`] that reuses pre-derived `keys` when available.
+pub async fn decrypt_to_temp_with_keys(
+    id: u64,
+    input: &Path,
+    password: &str,
+    keys: Option<upzip_core::Keys>,
     staging_parent: Option<&Path>,
     cancel: &CancelToken,
     emit: &mut (dyn FnMut(TaskEvent) + Send),
@@ -410,7 +458,7 @@ pub async fn decrypt_to_temp(
                 line: format!("SSEFE v4 解密 {percent}%"),
             });
         };
-        decrypt_to_path(input, password, &out_zip, cancel, &mut on_percent).await?;
+        decrypt_to_path_with_keys(input, password, keys, &out_zip, cancel, &mut on_percent).await?;
     }
 
     // decrypt_to_path disarmed its guard on success; take ownership again so a

@@ -1,5 +1,5 @@
 [package]
-name = "unparanoia-cli"
+name = "upzip-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,13 +7,13 @@ description = "Headless CLI: batch extraction of archives, masked archives and P
 repository.workspace = true
 
 [[bin]]
-name = "unparanoia-cli"
+name = "upzip-cli"
 path = "src/main.rs"
 
 [dependencies]
-unparanoia-core = { workspace = true }
-unparanoia-embedded-7z = { workspace = true }
-unparanoia-unpack-core = { workspace = true }
+upzip-core = { workspace = true }
+upzip-embedded-7z = { workspace = true }
+upzip-unpack-core = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

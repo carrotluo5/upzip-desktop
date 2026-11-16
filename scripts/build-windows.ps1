@@ -73,31 +73,31 @@ if ($Portable) {
   if ($LASTEXITCODE -ne 0) { Fail "pnpm build 失败" }
 
   Step "构建 GUI exe（cargo build --features custom-protocol）"
-  cargo build --release -p unparanoia --features custom-protocol
+  cargo build --release -p upzip --features custom-protocol
   if ($LASTEXITCODE -ne 0) { Fail "GUI 构建失败" }
 
   Step "构建 CLI exe（内嵌 7-Zip）"
-  cargo build --release -p unparanoia-cli
+  cargo build --release -p upzip-cli
   if ($LASTEXITCODE -ne 0) { Fail "CLI 构建失败" }
 
-  Step "组装单 exe 便携包（Unparanoia-$ver-win-x64-portable）"
-  $pkgName = "Unparanoia-$ver-win-x64-portable"
+  Step "组装单 exe 便携包（Upzip-$ver-win-x64-portable）"
+  $pkgName = "Upzip-$ver-win-x64-portable"
   $pkgDir = "$Root\target\windows-portable\$pkgName"
   $zipPath = "$Root\target\windows-portable\$pkgName.zip"
   Remove-Item -Recurse -Force $pkgDir -ErrorAction SilentlyContinue
   New-Item -ItemType Directory -Force -Path $pkgDir | Out-Null
-  Copy-Item "$Root\target\release\unparanoia.exe" "$pkgDir\Unparanoia.exe"
-  Copy-Item "$Root\target\release\unparanoia-cli.exe" "$pkgDir\unparanoia-cli.exe"
+  Copy-Item "$Root\target\release\unparanoia.exe" "$pkgDir\Upzip.exe"
+  Copy-Item "$Root\target\release\upzip-cli.exe" "$pkgDir\upzip-cli.exe"
   Copy-Item "$Root\binaries\7z-LICENSE.txt" "$pkgDir\7z-LICENSE.txt"
   @(
-    "Unparanoia（帕罗诺亚解包器）$ver — Windows x64 便携版（单 exe）",
+    "Upzip（智能批量解压）$ver — Windows x64 便携版（单 exe）",
     "================================================",
     "",
-    "用法：解压后直接运行 Unparanoia.exe；两个 exe 均已内嵌前端与 7-Zip 25.01。",
-    "首次运行会自动把内嵌 7-Zip 解压到 %LOCALAPPDATA%\Unparanoia\embedded-7z\25.01-r1\，",
-    "之后复用；可用环境变量 UNPARANOIA_7Z_CACHE_DIR 覆盖缓存根目录。无需安装外部 7-Zip。",
+    "用法：解压后直接运行 Upzip.exe；两个 exe 均已内嵌前端与 7-Zip 25.01。",
+    "首次运行会自动把内嵌 7-Zip 解压到 %LOCALAPPDATA%\Upzip\embedded-7z\25.01-r1\，",
+    "之后复用；可用环境变量 UPZIP_7Z_CACHE_DIR 覆盖缓存根目录。无需安装外部 7-Zip。",
     "",
-    "命令行：unparanoia-cli.exe --help / doctor / run 文件.enc -p 口令 -o 输出目录",
+    "命令行：upzip-cli.exe --help / doctor / run 文件.enc -p 口令 -o 输出目录",
     "",
     "要求：Windows 10/11 x64 + WebView2 Runtime（Win11 自带，Win10 需装 Evergreen）。",
     "未签 Authenticode，SmartScreen 可能提示未知发布者。"
@@ -117,7 +117,7 @@ if ($Portable) {
 Step "构建完成，产物清单"
 $found = $false
 if ($Portable) {
-  foreach ($p in @($zipPath, "$pkgDir\Unparanoia.exe", "$pkgDir\unparanoia-cli.exe")) {
+  foreach ($p in @($zipPath, "$pkgDir\Upzip.exe", "$pkgDir\upzip-cli.exe")) {
     if (Test-Path $p) {
       $found = $true
       $item = Get-Item $p
@@ -125,7 +125,7 @@ if ($Portable) {
       if (-not $item.PSIsContainer) { Write-Host ("               sha256 {0}" -f (Sha256 $p)) }
     }
   }
-  Write-Host "  包内文件: Unparanoia.exe / unparanoia-cli.exe / 7z-LICENSE.txt / README.txt / SHA256SUMS"
+  Write-Host "  包内文件: Upzip.exe / upzip-cli.exe / 7z-LICENSE.txt / README.txt / SHA256SUMS"
 } else {
   $nsisDir = "$Root\target\release\bundle\nsis"
   if (Test-Path $nsisDir) {
@@ -135,7 +135,7 @@ if ($Portable) {
       Write-Host ("               sha256 {0}" -f (Sha256 $_.FullName))
     }
   }
-  foreach ($name in @('unparanoia.exe','unparanoia-cli.exe')) {
+  foreach ($name in @('unparanoia.exe','upzip-cli.exe')) {
     $p = Join-Path "$Root\target\release" $name
     if (Test-Path $p) {
       $found = $true

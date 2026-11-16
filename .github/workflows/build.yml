@@ -1,8 +1,8 @@
 # CI: 构建 + 测试 + 打包
 #
 # 说明（诚实边界）:
-#   - 本仓库没有配置远端，此 workflow 尚未在 GitHub 上实际运行过；本地用手工命令
-#     验证过同等流程（docs/VERIFICATION.md）。首次 push 后请以 CI 结果为准。
+#   - 本 workflow 首次在 GitHub 远端运行即为真机验证；此前只用本地手工命令跑过
+#     同等流程（docs/VERIFICATION.md）。CI 结果与本地记录不一致时以 CI 为准。
 #   - Java Oracle 的"真实样本全链路验证"依赖仓库外的官方 Java 源码树与真实样本，
 #     CI 无法运行；CI 只跑可离线回放的 verification/oracle/test-vectors.json
 #     （cargo test --workspace 已包含）。
@@ -53,7 +53,7 @@ jobs:
         run: cargo test --workspace
 
       - name: Build CLI (release)
-        run: cargo build --release -p unparanoia-cli
+        run: cargo build --release -p upzip-cli
 
       - name: Make e2e fixtures
         run: ./scripts/make-fixtures.sh
@@ -73,12 +73,12 @@ jobs:
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: unparanoia-macos
+          name: upzip-macos
           if-no-files-found: warn
           path: |
             target/release/bundle/dmg/*.dmg
             target/release/bundle/macos/*.app
-            target/release/unparanoia-cli
+            target/release/upzip-cli
 
   # ---------------------------------------------------------------------------
   # Windows: 单测 + 单 exe 便携包（首次真机验证机会）
@@ -121,45 +121,45 @@ jobs:
         run: pnpm --dir gui build
 
       - name: Build CLI (release)
-        run: cargo build --release -p unparanoia-cli
+        run: cargo build --release -p upzip-cli
 
       # 裸 cargo 构建 GUI 必须带 --features custom-protocol；否则 exe 使用 devUrl
       # http://localhost:1420，在 CI/用户机器上白屏。
       - name: Build GUI (release, custom-protocol)
-        run: cargo build --release -p unparanoia --features custom-protocol
+        run: cargo build --release -p upzip --features custom-protocol
 
       - name: CLI smoke test
         shell: pwsh
         run: |
-          .\target\release\unparanoia-cli.exe --version
-          .\target\release\unparanoia-cli.exe doctor
+          .\target\release\upzip-cli.exe --version
+          .\target\release\upzip-cli.exe doctor
 
       - name: Package single-exe portable zip
         shell: pwsh
         run: |
           $ver = (Select-String -Path Cargo.toml -Pattern '^\s*version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
-          $pkg = "target/windows-portable/Unparanoia-$ver-win-x64-portable"
+          $pkg = "target/windows-portable/Upzip-$ver-win-x64-portable"
           New-Item -ItemType Directory -Force -Path $pkg | Out-Null
-          Copy-Item target/release/unparanoia.exe "$pkg/Unparanoia.exe"
-          Copy-Item target/release/unparanoia-cli.exe "$pkg/unparanoia-cli.exe"
+          Copy-Item target/release/upzip.exe "$pkg/Upzip.exe"
+          Copy-Item target/release/upzip-cli.exe "$pkg/upzip-cli.exe"
           Copy-Item binaries/7z-LICENSE.txt "$pkg/7z-LICENSE.txt"
           @(
-            "Unparanoia（帕罗诺亚解包器）$ver — Windows x64 便携版（单 exe）",
-            "两个 exe 均已内嵌 7-Zip 25.01；首次运行解压到 %LOCALAPPDATA%\Unparanoia\embedded-7z\25.01-r1\（可用 UNPARANOIA_7Z_CACHE_DIR 覆盖缓存根目录）。",
+            "Upzip（智能批量解压）$ver — Windows x64 便携版（单 exe）",
+            "两个 exe 均已内嵌 7-Zip 25.01；首次运行解压到 %LOCALAPPDATA%\Upzip\embedded-7z\25.01-r1\（可用 UPZIP_7Z_CACHE_DIR 覆盖缓存根目录）。",
             "要求 Windows 10/11 x64 + WebView2 Runtime；免安装；未签 Authenticode。"
           ) | Set-Content -Encoding UTF8 "$pkg/README.txt"
           $lines = foreach ($f in Get-ChildItem $pkg -File | Where-Object { $_.Name -ne 'SHA256SUMS' } | Sort-Object Name) {
             "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 -Path $f.FullName).Hash.ToLower(), $f.Name
           }
           $lines | Set-Content -Encoding ASCII "$pkg/SHA256SUMS"
-          Compress-Archive -Path "$pkg/*" -DestinationPath "target/windows-portable/Unparanoia-$ver-win-x64-portable.zip"
+          Compress-Archive -Path "$pkg/*" -DestinationPath "target/windows-portable/Upzip-$ver-win-x64-portable.zip"
 
       - name: Upload Windows portable artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: unparanoia-windows
+          name: upzip-windows
           if-no-files-found: warn
           path: |
             target/windows-portable/*.zip
-            target/release/unparanoia.exe
-            target/release/unparanoia-cli.exe
+            target/release/upzip.exe
+            target/release/upzip-cli.exe

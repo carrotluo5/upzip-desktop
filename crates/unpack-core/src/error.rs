@@ -11,7 +11,7 @@ pub enum UpError {
         source: std::io::Error,
     },
     #[error(
-        "找不到 7-Zip 可执行文件（已查找 {searched:?}）；请设置环境变量 UNPARANOIA_7Z 指向 7zz/7z.exe，\
+        "找不到 7-Zip 可执行文件（已查找 {searched:?}）；请设置环境变量 UPZIP_7Z 指向 7zz/7z.exe，\
          或把 7zz/7z.exe 放到应用同目录或 binaries/ 下"
     )]
     SevenZipMissing { searched: Vec<PathBuf> },

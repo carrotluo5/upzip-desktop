@@ -3,10 +3,10 @@ resolver = "2"
 members = ["crates/core", "crates/unpack-core", "crates/embedded-7z", "crates/cli", "gui/src-tauri"]
 
 [workspace.package]
-version = "0.3.3"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
-repository = "https://example.invalid/unparanoia"
+repository = "https://github.com/carrotluo5/upzip-desktop"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -20,9 +20,9 @@ regex = "1"
 dirs = "6"
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
-unparanoia-core = { path = "crates/core" }
-unparanoia-unpack-core = { path = "crates/unpack-core" }
-unparanoia-embedded-7z = { path = "crates/embedded-7z" }
+upzip-core = { path = "crates/core" }
+upzip-unpack-core = { path = "crates/unpack-core" }
+upzip-embedded-7z = { path = "crates/embedded-7z" }
 
 # Release profile shared by the CLI and the GUI app.
 # NOTE: the previous paranoia build used opt-level="s" + panic="abort"; the merged
