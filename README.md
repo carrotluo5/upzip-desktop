@@ -1,6 +1,6 @@
 # Upzip
 
-把文件拖进去，它自己认格式、自己解，嵌套的压缩包一层层解到底。
+把文件拖进窗口，剩下的它来：认格式、试密码、把嵌套的压缩包一层层解开。
 macOS 和 Windows 都有，界面是 Tauri，解包内核是 Rust。
 
 ![Upzip 界面](docs/screenshots/gui-0.4.0.png)
@@ -16,8 +16,9 @@ macOS 和 Windows 都有，界面是 Tauri，解包内核是 Rust。
 | 校验 | `SHA256SUMS.txt` |
 
 macOS 版没签名也没公证，第一次打开会被拦，右键点应用选「打开」就行。
-Windows 版解压出来直接双击 `Upzip.exe`，不用安装；包里还有 `upzip-cli.exe` 是命令行版，
-两个 exe 都内嵌了 7-Zip 25.01，首次运行会在 `%LOCALAPPDATA%\Upzip` 缓存一份 7-Zip。
+Windows 版解压出来直接双击 `Upzip.exe`，不用安装（Windows 10 要装 WebView2 Runtime，
+Windows 11 自带）；包里还有 `upzip-cli.exe` 是命令行版。两个 exe 都内嵌了 7-Zip 25.01，
+首次运行会在 `%LOCALAPPDATA%\Upzip` 缓存一份 7-Zip。
 
 ## 能解什么
 
@@ -36,7 +37,9 @@ Windows 版解压出来直接双击 `Upzip.exe`，不用安装；包里还有 `u
 队列里能暂停、取消、重试失败的项；左边「密码库」管密码，「设置」里换主题、开「跳过已处理」。
 遇到问题时，日志在配置目录的 `logs/upzip.log`，设置页的「诊断信息」能直接复制。
 
-Windows 便携包自带命令行。macOS 的自己编译：
+### 命令行
+
+Windows 便携包自带 `upzip-cli.exe`；macOS 上要自己编译：
 
 ```bash
 cargo build --release -p upzip-cli
@@ -92,7 +95,7 @@ upzip-cli cleanup-staging --root ~/Downloads      # 清理中断留下的临时�
 - 只解密和解包，不加密；Paranoia 只支持 v4。
 - 解出来的文件不会被执行。7-Zip 是子进程调用，恶意压缩包的风险由 7-Zip 承担，记得保持更新。
 - 密码通过命令行参数传给 7z 子进程，同机其他进程理论上能从进程表看到。
-- v0.4.0 之前这个项目叫 Unparanoia（帕罗诺亚解包器）。旧配置目录和密码库会自动读取，不用手动搬。
+- v0.4.0 把名字从 Unparanoia（帕罗诺亚解包器）改成了 Upzip。旧配置目录和密码库会自动读取，不用手动搬。
 
 ## 文档
 
