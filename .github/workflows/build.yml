@@ -204,7 +204,8 @@ jobs:
           $lines = foreach ($f in Get-ChildItem $pkg -File | Where-Object { $_.Name -ne 'SHA256SUMS' } | Sort-Object Name) {
             "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 -Path $f.FullName).Hash.ToLower(), $f.Name
           }
-          $lines | Set-Content -Encoding ASCII "$pkg/SHA256SUMS"
+          # 显式用 LF 换行：PowerShell 默认 CRLF，跨平台 sha256sum 会因行尾 \r 校验失败。
+          ($lines -join "`n") + "`n" | Set-Content -NoNewline -Encoding ASCII "$pkg/SHA256SUMS"
           Compress-Archive -Path "$pkg/*" -DestinationPath "target/windows-portable/Upzip-$ver-win-x64-portable.zip" -Force
           New-Item -ItemType Directory -Force -Path release-assets | Out-Null
           Copy-Item "target/windows-portable/Upzip-$ver-win-x64-portable.zip" "release-assets/"

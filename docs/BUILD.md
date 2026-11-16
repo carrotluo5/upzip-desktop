@@ -163,3 +163,35 @@ rm -f target/release/bundle/macos/Upzip_<version>_aarch64.dmg \
 清掉残留后重跑 `pnpm --dir gui tauri build --bundles dmg` 即可成功（v0.3.2/v0.3.3 最终构建已
 按此修复产出上表 DMG），无需 workaround、无需改代码。通用建议仍是：
 同一工作区串行构建，避免构建被中断后留下半成品。
+
+## 8. 打 tag 自动发版
+
+`.github/workflows/build.yml` 会在推送 `v*` tag 时，用 GitHub 的 macOS 与 Windows
+runner 各跑一遍测试和构建，再由 `release` job 把产物挂到同名 GitHub Release
+（不需要本地出包，也不需要手动上传）：
+
+```bash
+# 1) 先改三处版本号：Cargo.toml [workspace.package]、gui/package.json、
+#    gui/src-tauri/tauri.conf.json
+# 2) 提交后打 tag 推上去
+git commit -am "release: v0.4.1"
+git tag v0.4.1
+git push origin main v0.4.1
+```
+
+发布的资产：
+
+| 文件 | 说明 |
+|---|---|
+| `Upzip-<tag>-macos-<arch>.dmg` / `.app.zip` | runner 架构产物，`macos-latest` 目前是 arm64；仍为 ad-hoc 签名、未公证 |
+| `Upzip-<tag>-win-x64-portable.zip` | 真实 Windows runner 上编译的单 exe 便携包 |
+| `SHA256SUMS.txt` | 上面三个文件的 SHA-256 |
+
+注意：
+
+- tag 版本与 `Cargo.toml` 版本不一致时，workflow 只在 Actions 里发 warning：
+  文件名按 tag 命名，但 dmg/exe 内部版本号仍来自 `Cargo.toml`。发正式版前先 bump 版本号。
+- tag 名含 `-`（如 `v0.4.1-test.1`）会自动发布为 prerelease，适合先验证流程。
+- 推送分支的普通 CI 不会发 Release，只在 Actions 里留 `upzip-macos` / `upzip-windows`
+  artifact；tag 触发的 run 才会创建/覆盖 Release（同名 Release 已存在时覆盖上传资产并更新说明）。
+- 产物未签名，首次打开的处理方式同 §4。
