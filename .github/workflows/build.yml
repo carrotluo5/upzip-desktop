@@ -1,4 +1,4 @@
-# CI: 构建 + 测试 + 打包
+# CI: 构建 + 测试 + 打包（打 v* tag 时自动发布 Release）
 #
 # 说明（诚实边界）:
 #   - 本 workflow 首次在 GitHub 远端运行即为真机验证；此前只用本地手工命令跑过
@@ -9,11 +9,15 @@
 #   - Windows job 构建的是单 exe 便携 zip（GUI 用裸 cargo 构建，必须带
 #     --features custom-protocol，否则 exe 会连 devUrl localhost:1420 白屏）；
 #     这属于首次真机验证机会，若失败请以日志修配置，不要把步骤改成忽略错误。
+#   - 推送 v* tag 时，release job 会把两个平台在真实 runner 上构建出的产物
+#     上传到对应 GitHub Release。产物文件名按 tag 版本命名；若 tag 版本与
+#     Cargo.toml 版本不一致只发 warning（EXE/DMG 内部版本号仍是 Cargo.toml 的）。
 name: build
 
 on:
   push:
     branches: [main, master]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -75,18 +79,50 @@ jobs:
       - name: Build Tauri app (app + dmg)
         run: pnpm --dir gui tauri build
 
+      # 发布用文件名统一成 Upzip-<version>-macos-<arch>.<ext>：
+      # tauri 产出的 dmg 里带的是 Cargo.toml 版本号，和 tag 版本可能不同，
+      # 这里只改文件名，不动包内容。
+      - name: Stage release assets
+        id: stage
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(awk -F'"' '/^[[:space:]]*version[[:space:]]*=/{print $2; exit}' Cargo.toml)"
+          fi
+          case "$(uname -m)" in
+            arm64|aarch64) ARCH=macos-arm64 ;;
+            *) ARCH=macos-x64 ;;
+          esac
+          shopt -s nullglob
+          dmg_files=(target/release/bundle/dmg/*.dmg)
+          if [[ ${#dmg_files[@]} -eq 0 ]]; then
+            echo "没有找到 tauri 产出的 dmg" >&2
+            exit 1
+          fi
+          DMG="${dmg_files[0]}"
+          mkdir -p release-assets
+          cp "$DMG" "release-assets/Upzip-${VERSION}-${ARCH}.dmg"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "target/release/bundle/macos/Upzip.app" \
+            "release-assets/Upzip-${VERSION}-${ARCH}.app.zip"
+          cp target/release/upzip-cli release-assets/upzip-cli-macos
+          ls -l release-assets
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "arch=${ARCH}" >> "$GITHUB_OUTPUT"
+
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
           name: upzip-macos
           if-no-files-found: warn
-          path: |
-            target/release/bundle/dmg/*.dmg
-            target/release/bundle/macos/*.app
-            target/release/upzip-cli
+          # 只上传 release-assets/ 这一层，artifact 里就是扁平的文件名，
+          # release job 下载（merge-multiple）后路径不会多套一层目录。
+          path: release-assets/*
 
   # ---------------------------------------------------------------------------
-  # Windows: 单测 + 单 exe 便携包（首次真机验证机会）
+  # Windows: 单测 + 单 exe 便携包（在真实 Windows runner 上构建）
   # ---------------------------------------------------------------------------
   windows:
     name: Windows (x64)
@@ -123,6 +159,17 @@ jobs:
       - name: cargo test (workspace)
         run: cargo test --workspace
 
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $v = "${{ github.ref_name }}".TrimStart("v")
+          } else {
+            $v = (Select-String -Path Cargo.toml -Pattern '^\s*version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
       - name: Build frontend
         run: pnpm --dir gui build
 
@@ -143,7 +190,7 @@ jobs:
       - name: Package single-exe portable zip
         shell: pwsh
         run: |
-          $ver = (Select-String -Path Cargo.toml -Pattern '^\s*version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $ver = "${{ steps.ver.outputs.version }}"
           $pkg = "target/windows-portable/Upzip-$ver-win-x64-portable"
           New-Item -ItemType Directory -Force -Path $pkg | Out-Null
           Copy-Item target/release/upzip.exe "$pkg/Upzip.exe"
@@ -158,14 +205,125 @@ jobs:
             "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 -Path $f.FullName).Hash.ToLower(), $f.Name
           }
           $lines | Set-Content -Encoding ASCII "$pkg/SHA256SUMS"
-          Compress-Archive -Path "$pkg/*" -DestinationPath "target/windows-portable/Upzip-$ver-win-x64-portable.zip"
+          Compress-Archive -Path "$pkg/*" -DestinationPath "target/windows-portable/Upzip-$ver-win-x64-portable.zip" -Force
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          Copy-Item "target/windows-portable/Upzip-$ver-win-x64-portable.zip" "release-assets/"
+          Copy-Item target/release/upzip.exe "release-assets/upzip.exe"
+          Copy-Item target/release/upzip-cli.exe "release-assets/upzip-cli.exe"
 
       - name: Upload Windows portable artifacts
         uses: actions/upload-artifact@v4
         with:
           name: upzip-windows
           if-no-files-found: warn
-          path: |
-            target/windows-portable/*.zip
-            target/release/upzip.exe
-            target/release/upzip-cli.exe
+          # 同 macOS：只传 release-assets/ 这一层，保持文件名扁平。
+          path: release-assets/*
+
+  # ---------------------------------------------------------------------------
+  # 发布: 只有 v* tag 才跑；把上面两个 job 的产物挂到 GitHub Release
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    needs: [macos, windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag version
+        id: tag
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION="$(awk -F'"' '/^[[:space:]]*version[[:space:]]*=/{print $2; exit}' Cargo.toml)"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          if [[ "v${CARGO_VERSION}" != "${GITHUB_REF_NAME}" ]]; then
+            echo "::warning::tag ${GITHUB_REF_NAME} 与 Cargo.toml 版本 ${CARGO_VERSION} 不一致；产物文件名按 tag 命名，EXE/DMG 内部版本号仍是 ${CARGO_VERSION}"
+          fi
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          cd release-assets
+          ls -l Upzip-*
+          sha256sum \
+            Upzip-*-macos-*.dmg \
+            Upzip-*-macos-*.app.zip \
+            Upzip-*-win-x64-portable.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Write release notes
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.tag.outputs.version }}"
+          {
+            echo "Upzip ${VERSION} — macOS / Windows 批量智能解压工具。"
+            echo
+            echo "本页产物由 GitHub Actions 在真实 macOS runner 与 Windows runner 上构建。"
+            echo
+            echo "## 下载"
+            echo
+            echo "| 文件 | 平台 | 说明 |"
+            echo "| --- | --- | --- |"
+            echo "| \`Upzip-${VERSION}-macos-*.dmg\` | macOS | 安装镜像；ad-hoc 签名未公证，首次打开需右键「打开」 |"
+            echo "| \`Upzip-${VERSION}-macos-*.app.zip\` | macOS | 已解压好的 .app，未签名情况同上 |"
+            echo "| \`Upzip-${VERSION}-win-x64-portable.zip\` | Windows 10/11 x64 | 解压即用，免安装；需要 WebView2 Runtime；未签 Authenticode |"
+            echo
+            echo "## 校验和"
+            echo
+            echo '```'
+            cat release-assets/SHA256SUMS.txt
+            echo '```'
+            echo
+            echo "## 说明"
+            echo
+            echo "- macOS 版只发布 GUI（Upzip.app）；Windows 包内为 \`Upzip.exe\` + \`upzip-cli.exe\`，两个 exe 都内嵌 7-Zip 25.01。"
+            echo "- macOS 包未做开发者签名与公证；Windows 包未签 Authenticode，首次运行可能触发 SmartScreen 提示。"
+            echo "- 只解压不加密；不支持 Paranoia v3 加密容器；GUI 内输入的密码保存在本地明文配置中，CLI 密码经 argv 传给子进程。"
+            echo "- 更完整的使用说明见仓库 README。"
+          } > release-notes.md
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.tag.outputs.version }}"
+          PRERELEASE=""
+          case "$VERSION" in
+            *-*) PRERELEASE="--prerelease" ;;
+          esac
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME 已存在，改为覆盖上传"
+            gh release upload "$GITHUB_REF_NAME" \
+              release-assets/Upzip-*-macos-*.dmg \
+              release-assets/Upzip-*-macos-*.app.zip \
+              release-assets/Upzip-*-win-x64-portable.zip \
+              release-assets/SHA256SUMS.txt \
+              --clobber
+            gh release edit "$GITHUB_REF_NAME" \
+              --title "Upzip ${VERSION}" \
+              --notes-file release-notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              release-assets/Upzip-*-macos-*.dmg \
+              release-assets/Upzip-*-macos-*.app.zip \
+              release-assets/Upzip-*-win-x64-portable.zip \
+              release-assets/SHA256SUMS.txt \
+              --title "Upzip ${VERSION}" \
+              --notes-file release-notes.md \
+              --verify-tag \
+              $PRERELEASE
+          fi
+          echo "== 发布结果 =="
+          gh release view "$GITHUB_REF_NAME" --json tagName,name,isPrerelease,url,assets \
+            -q '"\(.tagName) | \(.name) | prerelease=\(.isPrerelease) | \(.url)", (.assets[] | "\(.name) \(.size) B")'
