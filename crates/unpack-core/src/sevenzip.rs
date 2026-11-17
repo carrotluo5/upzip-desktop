@@ -93,11 +93,12 @@ pub const JUNK_NAMES: &[&str] = &[
 ];
 
 impl ListResult {
+    /// Does any real path component name OS junk? Empty components produced by
+    /// trailing or repeated separators (`"docs/"`, `"a//b.txt"`) are not junk
+    /// themselves: a plain directory entry must keep counting as content.
     pub fn is_junk_path(path: &str) -> bool {
-        path.split('/').any(|c| {
-            c.is_empty()
-                || JUNK_NAMES.iter().any(|j| j.eq_ignore_ascii_case(c))
-                || c.starts_with("._")
+        path.split('/').filter(|c| !c.is_empty()).any(|c| {
+            JUNK_NAMES.iter().any(|j| j.eq_ignore_ascii_case(c)) || c.starts_with("._")
         })
     }
 
@@ -621,8 +622,9 @@ impl SevenZip {
         })
     }
 
-    /// Extract into `dest`. `-aos` keeps the staging dir idempotent; the real
-    /// conflict policy is applied when the staging content is moved into place.
+    /// Extract into `dest`, always filtering known OS junk. This keeps the
+    /// historical public signature; callers that expose `--no-strip-junk` must
+    /// use [`SevenZip::extract_with_options`] instead.
     pub async fn extract(
         &self,
         archive: &Path,
@@ -631,23 +633,43 @@ impl SevenZip {
         cancel: &CancelToken,
         on_line: &mut (dyn FnMut(&str) + Send),
     ) -> Result<ExtractStats> {
+        self.extract_with_options(archive, password, dest, true, cancel, on_line)
+            .await
+    }
+
+    /// Extract into `dest`. `-aos` keeps the staging dir idempotent; the real
+    /// conflict policy is applied when the staging content is moved into place.
+    ///
+    /// `strip_junk` forwards the `.DS_Store` / `__MACOSX` / `._*` / `Thumbs.db`
+    /// exclusions to 7-Zip. With it off nothing is excluded, which is what
+    /// `--no-strip-junk` and the GUI "清理系统垃圾条目" switch require.
+    pub async fn extract_with_options(
+        &self,
+        archive: &Path,
+        password: Option<&str>,
+        dest: &Path,
+        strip_junk: bool,
+        cancel: &CancelToken,
+        on_line: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<ExtractStats> {
         std::fs::create_dir_all(dest).map_err(|e| UpError::Io {
             path: dest.to_path_buf(),
             source: e,
         })?;
-        let args = vec![
+        let mut args = vec![
             "x".to_string(),
             "-y".to_string(),
             "-sccUTF-8".to_string(),
             "-bsp1".to_string(),
             "-aos".to_string(),
-            "-xr!__MACOSX".to_string(),
-            "-xr!.DS_Store".to_string(),
-            "-xr!._*".to_string(),
-            "-xr!Thumbs.db".to_string(),
-            format!("-o{}", dest.to_string_lossy()),
-            archive.to_string_lossy().into_owned(),
         ];
+        if strip_junk {
+            for pattern in ["__MACOSX", ".DS_Store", "._*", "Thumbs.db"] {
+                args.push(format!("-xr!{pattern}"));
+            }
+        }
+        args.push(format!("-o{}", dest.to_string_lossy()));
+        args.push(archive.to_string_lossy().into_owned());
         let (code, out, err) = self.run(&args, password, None, cancel, on_line).await?;
         let text = format!("{out}\n{err}");
         match code {
@@ -999,5 +1021,83 @@ mod tests {
         });
         assert_eq!(r.top_level(false).len(), 2);
         assert_eq!(r.top_level(true), vec!["root".to_string()]);
+    }
+
+    /// Empty components (trailing `/`, `a//b`) are path syntax, not junk: they
+    /// used to mark every directory entry as junk and skew `top_level(true)`.
+    #[test]
+    fn junk_path_ignores_empty_path_components() {
+        for path in ["docs/", "", "./docs/", "a//b.txt", "empty_dir/"] {
+            assert!(!ListResult::is_junk_path(path), "{path:?} must be content");
+        }
+        for path in [
+            "__MACOSX/",
+            "docs/__MACOSX/x",
+            ".DS_Store",
+            "docs/._x",
+            "a//Thumbs.db",
+        ] {
+            assert!(ListResult::is_junk_path(path), "{path:?} must be junk");
+        }
+    }
+
+    /// `--no-strip-junk` must reach 7-Zip: with the switch off the exclusions
+    /// disappear and `.DS_Store` / `__MACOSX` are extracted again.
+    #[tokio::test]
+    async fn strip_junk_option_controls_extraction_exclusions() {
+        let Ok(sz) = SevenZip::locate(None) else {
+            eprintln!("7-Zip not available; skipping strip-junk extraction test");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "upzip-strip-junk-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let src = dir.join("src");
+        std::fs::create_dir_all(src.join("__MACOSX")).unwrap();
+        std::fs::write(src.join("keep.txt"), b"keep").unwrap();
+        std::fs::write(src.join(".DS_Store"), b"junk").unwrap();
+        std::fs::write(src.join("__MACOSX").join("x"), b"junk").unwrap();
+        let status = std::process::Command::new(&sz.exe)
+            .args([
+                "a",
+                "-tzip",
+                "-mx=0",
+                "sample.zip",
+                "keep.txt",
+                ".DS_Store",
+                "__MACOSX/x",
+            ])
+            .current_dir(&src)
+            .status()
+            .unwrap();
+        assert!(status.success(), "7-Zip failed to build junk fixture");
+        let archive = src.join("sample.zip");
+        let cancel = CancelToken::new();
+        for (strip_junk, junk_expected) in [(false, true), (true, false)] {
+            let dest = dir.join(if strip_junk { "filtered" } else { "unfiltered" });
+            sz.extract_with_options(
+                &archive,
+                None,
+                &dest,
+                strip_junk,
+                &cancel,
+                &mut |_| {},
+            )
+            .await
+            .unwrap();
+            assert!(dest.join("keep.txt").exists(), "payload always extracted");
+            assert_eq!(
+                dest.join(".DS_Store").exists(),
+                junk_expected,
+                "strip_junk={strip_junk}: .DS_Store handling"
+            );
+            assert_eq!(
+                dest.join("__MACOSX").join("x").exists(),
+                junk_expected,
+                "strip_junk={strip_junk}: __MACOSX handling"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

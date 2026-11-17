@@ -372,9 +372,59 @@ fn family_key(file: &Path) -> Option<(String, u32)> {
     let name = file.file_name()?.to_str()?;
     let parsed = parse_volume_name(name)?;
     Some((
-        format!("{}|{:?}|{}", parsed.base, parsed.kind, parsed.encrypted),
+        format!(
+            "{}|{:?}|{}|{}",
+            parsed.base,
+            parsed.kind,
+            parsed.encrypted,
+            family_dir(file).display()
+        ),
         parsed.index,
     ))
+}
+
+/// Directory that owns a volume, normalised so that `a.7z.001` in `/dirA` and in
+/// `/dirB` never collapse into one task. `canonicalize` resolves `.`/`..` and
+/// symlinks; nonexistent paths fall back to a lexical cleanup of the absolute
+/// form so relative inputs still group correctly.
+fn family_dir(file: &Path) -> PathBuf {
+    let parent = match file.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    std::fs::canonicalize(&parent).unwrap_or_else(|_| {
+        let absolute = if parent.is_absolute() {
+            parent.clone()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(&parent))
+                .unwrap_or_else(|_| parent.clone())
+        };
+        lexical_normalize(&absolute)
+    })
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let folds = matches!(out.components().next_back(), Some(Component::Normal(_)));
+                if folds {
+                    out.pop();
+                } else {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        out.push(".");
+    }
+    out
 }
 
 /// Expected number of volumes of a split 7z archive, derived from its start header.
@@ -525,6 +575,39 @@ mod tests {
                 PathBuf::from("/in/plain.zip"),
             ]
         );
+    }
+
+    /// Same-named families in different folders are different archives; the key
+    /// must include the normalised parent, not only the file name.
+    #[test]
+    fn group_inputs_keeps_same_named_families_in_different_dirs_apart() {
+        let files = vec![
+            PathBuf::from("/dirA/a.7z.001"),
+            PathBuf::from("/dirB/a.7z.001"),
+            PathBuf::from("/dirA/a.7z.002"),
+            PathBuf::from("/dirB/a.7z.002"),
+        ];
+        let grouped = group_inputs(&files);
+        assert_eq!(
+            grouped,
+            vec![
+                PathBuf::from("/dirA/a.7z.001"),
+                PathBuf::from("/dirB/a.7z.001"),
+            ]
+        );
+    }
+
+    /// Relative spellings of one folder (`./relA`, `relA`, `relA/.`) must still
+    /// collapse into a single family even when the folder does not exist yet.
+    #[test]
+    fn group_inputs_merges_equivalent_relative_parent_dirs() {
+        let files = vec![
+            PathBuf::from("./relA/a.7z.002"),
+            PathBuf::from("relA/a.7z.001"),
+            PathBuf::from("relA/./a.7z.003"),
+        ];
+        let grouped = group_inputs(&files);
+        assert_eq!(grouped, vec![PathBuf::from("relA/a.7z.001")]);
     }
 
     #[test]

@@ -373,7 +373,7 @@ mod tests {
         assert!(fs::read_dir(&out_dir).unwrap().all(|entry| {
             let name = entry.unwrap().file_name();
             let name = name.to_string_lossy();
-            !name.starts_with(".paranoia-enc-")
+            !name.starts_with(".upzip-enc-")
         }));
         fs::remove_dir_all(&dir).unwrap();
     }

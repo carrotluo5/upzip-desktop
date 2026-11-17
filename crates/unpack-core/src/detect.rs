@@ -10,7 +10,7 @@ use regex::Regex;
 use uuid::Uuid;
 
 use crate::cancel::CancelToken;
-use crate::error::{Result, UpError};
+use crate::error::{io_ctx, Result, UpError};
 use crate::sevenzip::{ListResult, SevenZip};
 use crate::types::{Detection, FileKind, PasswordState};
 use crate::util::{fingerprint, read_at, remove_path};
@@ -464,7 +464,20 @@ fn find_local_header(path: &Path, name: &[u8], size: u64) -> Result<Option<u64>>
 /// the cached carve instead of copying several gigabytes again. Entries older
 /// than 72 h are pruned opportunistically on the next carve.
 pub fn carve_to_temp(src: &Path, start: u64, end: u64, key: &str) -> Result<PathBuf> {
-    let dir = std::env::temp_dir().join("paranoia-carve");
+    carve_to_temp_with_cancel(src, start, end, key, &CancelToken::new())
+}
+
+/// Same as [`carve_to_temp`], but aborts the copy as soon as `cancel` fires and
+/// removes the partially written `.part-*` file before returning
+/// [`UpError::Cancelled`]. Multi-gigabyte payloads must not be uncancellable.
+pub fn carve_to_temp_with_cancel(
+    src: &Path,
+    start: u64,
+    end: u64,
+    key: &str,
+    cancel: &CancelToken,
+) -> Result<PathBuf> {
+    let dir = std::env::temp_dir().join("upzip-carve");
     fs::create_dir_all(&dir).map_err(|e| UpError::Io {
         path: dir.clone(),
         source: e,
@@ -492,30 +505,33 @@ pub fn carve_to_temp(src: &Path, start: u64, end: u64, key: &str) -> Result<Path
     }
 
     let part = dir.join(format!(".part-{}", Uuid::new_v4().simple()));
-    let copied = (|| -> std::io::Result<()> {
-        let mut in_f = File::open(src)?;
-        in_f.seek(SeekFrom::Start(start))?;
-        let mut out_f = File::create(&part)?;
+    let copied = (|| -> Result<()> {
+        if cancel.is_cancelled() {
+            return Err(UpError::Cancelled);
+        }
+        let mut in_f = io_ctx(src, File::open(src))?;
+        io_ctx(src, in_f.seek(SeekFrom::Start(start)))?;
+        let mut out_f = io_ctx(&part, File::create(&part))?;
         let mut buf = vec![0u8; 1 << 20];
         let mut remaining = want;
         while remaining > 0 {
+            if cancel.is_cancelled() {
+                return Err(UpError::Cancelled);
+            }
             let chunk = buf.len().min(remaining as usize);
-            let n = in_f.read(&mut buf[..chunk])?;
+            let n = io_ctx(src, in_f.read(&mut buf[..chunk]))?;
             if n == 0 {
                 break;
             }
-            out_f.write_all(&buf[..n])?;
+            io_ctx(&part, out_f.write_all(&buf[..n]))?;
             remaining -= n as u64;
         }
-        out_f.flush()?;
+        io_ctx(&part, out_f.flush())?;
         Ok(())
     })();
     if let Err(e) = copied {
         let _ = fs::remove_file(&part);
-        return Err(UpError::Io {
-            path: out.clone(),
-            source: e,
-        });
+        return Err(e);
     }
     fs::rename(&part, &out).map_err(|e| UpError::Io {
         path: out.clone(),
@@ -553,6 +569,16 @@ fn prune_carve_cache(dir: &Path) {
 /// *not* classified here: they fall through to the normal archive sniffing, so a
 /// renamed ZIP/RAR still works.
 pub fn ssefe_detection(head: &[u8], size: u64, path: &Path) -> Option<Detection> {
+    let known_fp = fingerprint(path).unwrap_or_default();
+    ssefe_detection_with_fingerprint(head, size, path, &known_fp)
+}
+
+fn ssefe_detection_with_fingerprint(
+    head: &[u8],
+    size: u64,
+    path: &Path,
+    known_fp: &str,
+) -> Option<Detection> {
     let probe = crate::ssefe::probe_head(head, size, path)?;
     let notes = vec![
         probe.describe(),
@@ -573,20 +599,26 @@ pub fn ssefe_detection(head: &[u8], size: u64, path: &Path) -> Option<Detection>
         container: "ssefe".to_string(),
         format: Some("paranoia-enc-v4".to_string()),
         password_state: PasswordState::NeedsPassword,
-        fingerprint: fingerprint(path).unwrap_or_default(),
+        fingerprint: known_fp.to_string(),
         notes,
         ..Default::default()
     })
 }
 
-/// Full detection for one file.
-pub async fn detect(sz: &SevenZip, path: &Path, cancel: &CancelToken) -> Result<Detection> {
-    let meta = fs::metadata(path).map_err(|e| UpError::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    let size = meta.len();
+/// Header probe shared by both detection entry points.
+struct HeadProbe {
+    size: u64,
+    head: Vec<u8>,
+    fingerprint: String,
+}
 
+fn probe_head_blocking(path: &Path, known: Option<&str>) -> Result<HeadProbe> {
+    let size = fs::metadata(path)
+        .map_err(|e| UpError::Io {
+            path: path.to_path_buf(),
+            source: e,
+        })?
+        .len();
     let mut f = File::open(path).map_err(|e| UpError::Io {
         path: path.to_path_buf(),
         source: e,
@@ -594,23 +626,81 @@ pub async fn detect(sz: &SevenZip, path: &Path, cancel: &CancelToken) -> Result<
     let mut head = vec![0u8; HEAD_SCAN];
     let n = read_at(&mut f, 0, &mut head).unwrap_or(0);
     head.truncate(n);
-    drop(f);
+    // A caller that already hashed this file (the processed store) hands the
+    // value over, so the same 16 MiB are never read twice.
+    let fingerprint = match known {
+        Some(value) if !value.is_empty() => value.to_string(),
+        _ => fingerprint(path).unwrap_or_default(),
+    };
+    Ok(HeadProbe {
+        size,
+        head,
+        fingerprint,
+    })
+}
+
+/// Full detection for one file.
+pub async fn detect(sz: &SevenZip, path: &Path, cancel: &CancelToken) -> Result<Detection> {
+    detect_with_fingerprint(sz, path, cancel, None).await
+}
+
+/// Detection that reuses `known_fingerprint` when the caller already computed it
+/// (the engine's opt-in processed store), avoiding a second 16 MiB SHA-256 pass.
+pub async fn detect_with_fingerprint(
+    sz: &SevenZip,
+    path: &Path,
+    cancel: &CancelToken,
+    known_fingerprint: Option<&str>,
+) -> Result<Detection> {
+    if cancel.is_cancelled() {
+        return Err(UpError::Cancelled);
+    }
+
+    // Header read + sample hash are blocking disk I/O; keep the runtime free.
+    let probe_path = path.to_path_buf();
+    let known = known_fingerprint.map(str::to_string);
+    let probe =
+        tokio::task::spawn_blocking(move || probe_head_blocking(&probe_path, known.as_deref()))
+            .await
+            .map_err(|join| UpError::Other(format!("检测线程异常终止：{join}")))??;
+    let HeadProbe {
+        size,
+        head,
+        fingerprint: file_fp,
+    } = probe;
 
     // Paranoia File Encryption v4 must never reach 7-Zip: the plaintext ZIP only
     // exists after decryption, so listing the ciphertext would fail noisily.
-    if let Some(det) = ssefe_detection(&head, size, path) {
+    if let Some(det) = ssefe_detection_with_fingerprint(&head, size, path, &file_fp) {
         return Ok(det);
     }
 
     let magic = sniff(&head).map(|s| s.to_string());
-    let pe = if head.starts_with(b"MZ") {
-        pe_info(path).unwrap_or(None)
-    } else {
-        None
-    };
+    let is_mz = head.starts_with(b"MZ");
+    let is_mp4 = head.len() >= 8 && head[4..8] == b"ftyp"[..];
+
+    // Tail parsing, PE probing and stub scanning all hit the disk.
+    let scan_path = path.to_path_buf();
+    let (tail, pe, stub_scan) = tokio::task::spawn_blocking(move || {
+        let pe = if is_mz {
+            pe_info(&scan_path).unwrap_or(None)
+        } else {
+            None
+        };
+        let tail = analyze_tail(&scan_path, size).unwrap_or(None);
+        let scan = if pe.is_some() {
+            Some(scan_stub(&scan_path))
+        } else {
+            None
+        };
+        (tail, pe, scan)
+    })
+    .await
+    .map_err(|join| UpError::Other(format!("检测线程异常终止：{join}")))?;
+
     let container = if pe.is_some() {
         "pe"
-    } else if head.len() >= 8 && &head[4..8] == &b"ftyp"[..] {
+    } else if is_mp4 {
         "mp4"
     } else if magic.is_some() {
         "plain"
@@ -618,15 +708,13 @@ pub async fn detect(sz: &SevenZip, path: &Path, cancel: &CancelToken) -> Result<
         "other"
     };
 
-    let tail = analyze_tail(path, size).unwrap_or(None);
-
     let mut det = Detection {
         path: path.to_path_buf(),
         size,
         kind: FileKind::Unknown,
         container: container.to_string(),
         format: magic.clone(),
-        fingerprint: fingerprint(path).unwrap_or_default(),
+        fingerprint: file_fp,
         ..Default::default()
     };
 
@@ -658,8 +746,7 @@ pub async fn detect(sz: &SevenZip, path: &Path, cancel: &CancelToken) -> Result<
     }
 
     // SFX stubs and archive comments often carry the password in plain text.
-    if pe.is_some() {
-        let scan = scan_stub(path);
+    if let Some(scan) = stub_scan {
         for h in scan.hints {
             if !det.hints.contains(&h) {
                 det.hints.push(h);
@@ -705,8 +792,31 @@ pub async fn detect(sz: &SevenZip, path: &Path, cancel: &CancelToken) -> Result<
                         }
                     }
                     for (from, to) in ranges {
-                        let Ok(tmp) = carve_to_temp(path, from, to, &det.fingerprint) else {
-                            continue;
+                        if cancel.is_cancelled() {
+                            return Err(UpError::Cancelled);
+                        }
+                        let key = det.fingerprint.clone();
+                        let carve_src = path.to_path_buf();
+                        let carve_cancel = cancel.clone();
+                        // Carving can copy gigabytes: run it on the blocking pool
+                        // and let the cancellation token stop the copy midway.
+                        let carved = tokio::task::spawn_blocking(move || {
+                            carve_to_temp_with_cancel(
+                                &carve_src,
+                                from,
+                                to,
+                                &key,
+                                &carve_cancel,
+                            )
+                        })
+                        .await
+                        .map_err(|join| {
+                            UpError::Other(format!("雕刻线程异常终止：{join}"))
+                        })?;
+                        let tmp = match carved {
+                            Ok(tmp) => tmp,
+                            Err(UpError::Cancelled) => return Err(UpError::Cancelled),
+                            Err(_) => continue,
                         };
                         match sz.list(&tmp, None, cancel).await {
                             Ok(l2) => {
@@ -716,6 +826,10 @@ pub async fn detect(sz: &SevenZip, path: &Path, cancel: &CancelToken) -> Result<
                                 let what = if t.zip64 { "ZIP64 payload" } else { "payload" };
                                 det.notes.push(format!("{what} carved from offset {from}"));
                                 break;
+                            }
+                            Err(UpError::Cancelled) => {
+                                let _ = fs::remove_file(&tmp);
+                                return Err(UpError::Cancelled);
                             }
                             Err(_) => {
                                 let _ = fs::remove_file(&tmp);
@@ -1069,5 +1183,79 @@ mod tests {
             std::path::Path::new("x.enc")
         )
         .is_none());
+    }
+
+    /// The processed store already hashed the file; detection must reuse that
+    /// value instead of reading the same 16 MiB again.
+    #[tokio::test]
+    async fn detect_reuses_known_fingerprint() {
+        let dir = std::env::temp_dir().join(format!(
+            "upzip-detect-fp-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("sample.zip");
+        std::fs::write(&file, b"PK\x05\x06payload").unwrap();
+        let real = fingerprint(&file).unwrap();
+        assert!(!real.is_empty());
+
+        let probe = probe_head_blocking(&file, None).unwrap();
+        assert_eq!(probe.fingerprint, real);
+        let reused = probe_head_blocking(&file, Some("known-fingerprint")).unwrap();
+        assert_eq!(reused.fingerprint, "known-fingerprint");
+        assert_eq!(reused.size, probe.size);
+
+        // A 7-Zip binary is not needed: a failed listing is still a detection.
+        let sz = SevenZip::new(PathBuf::from("/definitely/not/a/7z-binary"));
+        let det = detect_with_fingerprint(&sz, &file, &CancelToken::new(), Some(&real))
+            .await
+            .unwrap();
+        assert_eq!(det.fingerprint, real);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cancellation outranks filesystem errors: no metadata read is attempted.
+    #[tokio::test]
+    async fn detect_returns_cancelled_before_touching_the_file() {
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let sz = SevenZip::new(PathBuf::from("/definitely/not/a/7z-binary"));
+        let err = detect(&sz, Path::new("/definitely/missing/input.zip"), &cancel)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, UpError::Cancelled), "error = {err:?}");
+    }
+
+    /// A cancelled carve must not leave a half-written `.part-*` file behind.
+    #[test]
+    fn carve_cancel_removes_partial_output() {
+        let dir = std::env::temp_dir().join(format!(
+            "upzip-carve-cancel-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("payload.bin");
+        std::fs::write(&src, vec![0x5Au8; 3 * 1024 * 1024]).unwrap();
+
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let key = format!("cancel-{}", uuid::Uuid::new_v4().simple());
+        let err = carve_to_temp_with_cancel(&src, 0, 1024 * 1024, &key, &cancel)
+            .unwrap_err();
+        assert!(matches!(err, UpError::Cancelled), "error = {err:?}");
+
+        let cache = std::env::temp_dir().join("upzip-carve");
+        let out = cache.join(format!("{key}-{:x}.zip", 0));
+        assert!(!out.exists(), "cancelled carve must not publish {out:?}");
+        if let Ok(rd) = std::fs::read_dir(&cache) {
+            for entry in rd.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                assert!(
+                    !name.starts_with(".part-") || !name.contains(&key),
+                    "partial file left behind: {name}"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

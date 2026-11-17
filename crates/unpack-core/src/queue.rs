@@ -43,7 +43,10 @@ fn collect(
         Err(_) => return,
     };
     if meta.is_dir() {
-        if !recursive {
+        // With recursion off an explicit root folder is still scanned one level
+        // deep (its direct files only); descending into its children is what
+        // stops here.
+        if !recursive && !is_root {
             return;
         }
         if !is_root {
@@ -228,6 +231,27 @@ mod tests {
     use super::*;
     use crate::sevenzip::SevenZip;
     use crate::types::RunConfig;
+
+    /// `--no-recursive` still treats an explicitly given folder as input: scan
+    /// its direct files, but never descend into its subfolders.
+    #[test]
+    fn non_recursive_root_scan_collects_direct_files_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "upzip-queue-recursive-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("top.zip"), b"x").unwrap();
+        fs::write(dir.join("sub").join("inner.zip"), b"x").unwrap();
+
+        let direct = expand_inputs(std::slice::from_ref(&dir), false, None);
+        assert_eq!(direct, vec![dir.join("top.zip")]);
+
+        let deep = expand_inputs(std::slice::from_ref(&dir), true, None);
+        assert_eq!(deep.len(), 2, "recursive scan: {deep:?}");
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn fatal_statuses() {

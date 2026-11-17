@@ -98,18 +98,115 @@ pub fn sanitize_component(name: &str) -> String {
 pub fn free_space(path: &Path) -> Option<u64> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
-    let c = CString::new(path.as_os_str().as_bytes()).ok()?;
-    unsafe {
-        let mut st: libc::statvfs = std::mem::zeroed();
-        if libc::statvfs(c.as_ptr(), &mut st) == 0 {
-            Some(st.f_bavail as u64 * st.f_frsize as u64)
-        } else {
-            None
+
+    fn statvfs_free(dir: &Path) -> Option<u64> {
+        let c = CString::new(dir.as_os_str().as_bytes()).ok()?;
+        unsafe {
+            let mut st: libc::statvfs = std::mem::zeroed();
+            if libc::statvfs(c.as_ptr(), &mut st) == 0 {
+                Some(st.f_bavail as u64 * st.f_frsize as u64)
+            } else {
+                None
+            }
         }
     }
+
+    // The output folder may not exist yet; fall back to its closest ancestor.
+    let mut current = Some(path);
+    while let Some(dir) = current {
+        if let Some(free) = statvfs_free(dir) {
+            return Some(free);
+        }
+        current = dir.parent();
+    }
+    None
 }
 
-#[cfg(not(unix))]
+/// Free bytes on the volume that holds `path` (None when not determinable).
+#[cfg(windows)]
+pub fn free_space(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetDiskFreeSpaceExW(
+            directory: *const u16,
+            free_to_caller: *mut u64,
+            total_bytes: *mut u64,
+            total_free: *mut u64,
+        ) -> i32;
+    }
+
+    /// UTF-16, NUL-terminated, without a trailing separator (volume roots keep
+    /// theirs). Over-long paths are switched to the verbatim form Win32 needs:
+    /// `\\?\C:\…` for drives and `\\?\UNC\…` for UNC shares.
+    fn api_path(dir: &Path) -> Vec<u16> {
+        const BS: u16 = b'\\' as u16;
+        let mut units: Vec<u16> = dir.as_os_str().encode_wide().collect();
+        while units.len() > 1
+            && matches!(units.last(), Some(&c) if c == BS || c == b'/' as u16)
+        {
+            if units.len() == 3 && units[1] == b':' as u16 {
+                break;
+            }
+            if units.len() == 2 && units[0] == BS {
+                break;
+            }
+            units.pop();
+        }
+        let verbatim = units.len() >= 4 && units[..4] == [BS, BS, b'?' as u16, BS];
+        if !verbatim && units.len() >= 248 {
+            if units.len() >= 2 && units[0] == BS && units[1] == BS {
+                let mut prefixed = vec![
+                    BS,
+                    BS,
+                    b'?' as u16,
+                    BS,
+                    b'U' as u16,
+                    b'N' as u16,
+                    b'C' as u16,
+                    BS,
+                ];
+                prefixed.extend_from_slice(&units[2..]);
+                units = prefixed;
+            } else if units.len() >= 2 && units[1] == b':' as u16 {
+                let mut prefixed = vec![BS, BS, b'?' as u16, BS];
+                prefixed.extend_from_slice(&units);
+                units = prefixed;
+            }
+        }
+        units.push(0);
+        units
+    }
+
+    fn probe(dir: &Path) -> Option<u64> {
+        let wide = api_path(dir);
+        let mut free_to_caller = 0u64;
+        let ok = unsafe {
+            GetDiskFreeSpaceExW(
+                wide.as_ptr(),
+                &mut free_to_caller,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        (ok != 0).then_some(free_to_caller)
+    }
+
+    // The output folder may not exist yet, so walk up to the first ancestor the
+    // API can resolve; a volume root always can.
+    let mut current = Some(path);
+    while let Some(dir) = current {
+        if let Some(free) = probe(dir) {
+            return Some(free);
+        }
+        current = dir.parent();
+    }
+    None
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn free_space(_path: &Path) -> Option<u64> {
     None
 }
@@ -329,4 +426,29 @@ pub fn data_dir() -> PathBuf {
 /// Guard for `std::fs` calls that carry a path for context.
 pub fn fs_err<T>(path: &Path, r: std::io::Result<T>) -> Result<T> {
     io_ctx(path, r)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Free space must resolve for an existing folder and for a not-yet-created
+    /// subfolder (the output directory is created only at land time).
+    #[test]
+    fn free_space_resolves_existing_dirs_and_future_children() {
+        let dir = std::env::temp_dir();
+        let missing = dir.join(format!("upzip-free-space-{}/nested", std::process::id()));
+        #[cfg(any(unix, windows))]
+        {
+            let free = free_space(&dir).expect("free space for the temp dir");
+            assert!(free > 0, "free = {free}");
+            let via_ancestor = free_space(&missing).expect("ancestor fallback");
+            assert!(via_ancestor > 0, "ancestor free = {via_ancestor}");
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            assert!(free_space(&dir).is_none());
+            assert!(free_space(&missing).is_none());
+        }
+    }
 }

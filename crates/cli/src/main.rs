@@ -119,8 +119,10 @@ fn print_help() {
     println!("            才按 processed.json 指纹跳过已成功处理过的文件。");
     println!();
     println!("退出码：0 成功/跳过；1 有失败或缺少密码；2 用法/配置/环境错误；130 已取消");
-    println!("环境变量：UPZIP_PASSWORD（密码；兼容 PARANOIA_ENC_PASSWORD）、");
-    println!("          UPZIP_7Z（7-Zip 路径）、UPZIP_CONFIG_DIR（配置目录）");
+    println!(
+        "环境变量：UPZIP_PASSWORD（密码；兼容 UNPARANOIA_PASSWORD / PARANOIA_ENC_PASSWORD）、"
+    );
+    println!("          UPZIP_7Z（兼容 UNPARANOIA_7Z，7-Zip 路径）、UPZIP_CONFIG_DIR（配置目录）");
     println!("各子命令详情：upzip-cli <子命令> --help");
 }
 
@@ -331,7 +333,11 @@ fn add_password(list: &mut Vec<String>, candidate: &str) {
 
 /// Environment password. The new name wins; the 0.1.x name is a fallback.
 fn env_password() -> Option<String> {
-    for name in ["UPZIP_PASSWORD", "UPZIP_PASSWORD", "PARANOIA_ENC_PASSWORD"] {
+    for name in [
+        "UPZIP_PASSWORD",
+        "UNPARANOIA_PASSWORD",
+        "PARANOIA_ENC_PASSWORD",
+    ] {
         if let Ok(value) = std::env::var(name) {
             if !value.is_empty() {
                 return Some(value);
@@ -426,7 +432,7 @@ fn build_sevenzip(explicit: Option<PathBuf>) -> Result<SevenZip, i32> {
 }
 
 /// Resolve 7-Zip in priority order: explicit `--sevenzip` > `UPZIP_7Z` /
-/// `UPZIP_7Z` environment variable (only when it points at an existing file) >
+/// `UNPARANOIA_7Z` environment variable (only when it points at an existing file) >
 /// the runtime embedded into the Windows single-file build (no-op on macOS/Linux) >
 /// the regular `SevenZip::locate` automatic search (app dir, bundled binaries/,
 /// PATH, common install dirs).
@@ -479,9 +485,9 @@ fn finish_sevenzip_resolution(
         .map_err(|error| error.to_string())
 }
 
-/// First non-empty `UPZIP_7Z` / `UPZIP_7Z` that points at an existing file.
+/// First non-empty `UPZIP_7Z` / `UNPARANOIA_7Z` that points at an existing file.
 fn env_sevenzip_path() -> Option<PathBuf> {
-    for var in ["UPZIP_7Z", "UPZIP_7Z"] {
+    for var in ["UPZIP_7Z", "UNPARANOIA_7Z"] {
         if let Some(raw) = std::env::var_os(var).filter(|value| !value.is_empty()) {
             let path = PathBuf::from(raw);
             if path.is_file() {
@@ -1851,5 +1857,72 @@ fn collect_staging(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
         if is_dir {
             collect_staging(&path, depth + 1, out);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Environment mutation is process-wide; keep these tests serialised.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const ENV_VARS: [&str; 5] = [
+        "UPZIP_PASSWORD",
+        "UNPARANOIA_PASSWORD",
+        "PARANOIA_ENC_PASSWORD",
+        "UPZIP_7Z",
+        "UNPARANOIA_7Z",
+    ];
+
+    fn clear_env() {
+        for name in ENV_VARS {
+            std::env::remove_var(name);
+        }
+    }
+
+    fn touch(tag: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "upzip-env-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, b"x").unwrap();
+        path
+    }
+
+    #[test]
+    fn env_password_prefers_new_name_and_falls_back() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_env();
+        std::env::set_var("PARANOIA_ENC_PASSWORD", "oldest");
+        assert_eq!(env_password().as_deref(), Some("oldest"));
+        std::env::set_var("UNPARANOIA_PASSWORD", "legacy");
+        assert_eq!(env_password().as_deref(), Some("legacy"));
+        std::env::set_var("UPZIP_PASSWORD", "current");
+        assert_eq!(env_password().as_deref(), Some("current"));
+        // Empty values never shadow a lower-priority name.
+        std::env::set_var("UPZIP_PASSWORD", "");
+        assert_eq!(env_password().as_deref(), Some("legacy"));
+        clear_env();
+    }
+
+    #[test]
+    fn env_sevenzip_path_prefers_new_name_and_falls_back() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_env();
+        let legacy = touch("legacy-7z");
+        let current = touch("current-7z");
+        std::env::set_var("UNPARANOIA_7Z", &legacy);
+        assert_eq!(env_sevenzip_path(), Some(legacy.clone()));
+        std::env::set_var("UPZIP_7Z", &current);
+        assert_eq!(env_sevenzip_path(), Some(current.clone()));
+        clear_env();
+        let _ = std::fs::remove_file(legacy);
+        let _ = std::fs::remove_file(current);
     }
 }

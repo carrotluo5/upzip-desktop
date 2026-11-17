@@ -240,10 +240,13 @@ impl Engine {
             .unwrap_or_else(|| path.to_path_buf());
 
         // --- skip files that were already processed successfully -------------
-        let fp = fingerprint(&source_path).unwrap_or_default();
-        if cfg.skip_processed && !fp.is_empty() {
-            let store = self.processed_lock();
-            if store.contains(&fp) {
+        // The sample hash is only needed for the opt-in processed store. When it
+        // is computed here it is handed to `detect` so the file is never hashed
+        // twice; with the store off detection stays the only reader.
+        let mut fp = String::new();
+        if cfg.skip_processed {
+            fp = fingerprint(&source_path).unwrap_or_default();
+            if !fp.is_empty() && self.processed_lock().contains(&fp) {
                 bail!(
                     TaskStatus::Skipped,
                     "已处理过（历史记录跳过）：如需重新解压请点「重新解压」或在设置中关闭「跳过已处理」"
@@ -257,11 +260,21 @@ impl Engine {
             stage: "detect".into(),
             detail: None,
         });
-        let mut det = match detect::detect(&self.sz, &source_path, cancel).await {
+        let mut det = match detect::detect_with_fingerprint(
+            &self.sz,
+            &source_path,
+            cancel,
+            if fp.is_empty() { None } else { Some(fp.as_str()) },
+        )
+        .await
+        {
             Ok(d) => d,
             Err(UpError::Cancelled) => bail!(TaskStatus::Cancelled, "已取消"),
             Err(e) => bail!(TaskStatus::Failed, e.to_string()),
         };
+        if cfg.skip_processed && fp.is_empty() {
+            fp = det.fingerprint.clone();
+        }
         emit(TaskEvent::TaskDetected {
             id,
             detection: det.clone(),
@@ -830,6 +843,22 @@ impl Engine {
                     Err(UpError::Cancelled) => bail!(TaskStatus::Cancelled, "已取消"),
                     Err(_) => break,
                 };
+                // Office/JAR containers are ZIP files under the hood. Treating
+                // them as archives would scatter an .docx/.jar across the
+                // output, so keep the document intact unless the user opted in.
+                if !cfg.force_documents {
+                    let doc_ext = probe_path
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .map(|ext| ext.to_ascii_lowercase())
+                        .is_some_and(|ext| DOC_EXTS.contains(&ext.as_str()));
+                    if doc_ext || det_inner.office_like {
+                        det.notes.push(format!(
+                            "保留文档容器 {inner_name}（启用 force_documents 可展开）"
+                        ));
+                        break;
+                    }
+                }
                 let descend = matches!(
                     det_inner.kind,
                     FileKind::Archive
@@ -1131,7 +1160,11 @@ impl Engine {
 
             if nested_depth > 0 {
                 scrub_staging(&staging, &mut warnings);
-                let _ = layout::strip_junk_tree(&staging);
+                // The outer pass already honours cfg.strip_junk; inner layers
+                // must not reintroduce the junk that --no-strip-junk keeps.
+                if cfg.strip_junk {
+                    let _ = layout::strip_junk_tree(&staging);
+                }
                 items = fs::read_dir(&staging)
                     .map(|rd| rd.flatten().map(|e| e.path()).collect())
                     .unwrap_or_default();
@@ -1168,27 +1201,40 @@ impl Engine {
                 );
             }
         }
-        let mut stats = MoveStats::default();
-        let mut produced_items: Vec<String> = Vec::new();
-        for item in &items {
-            if cancel.is_cancelled() {
-                bail!(TaskStatus::Cancelled, "已取消");
-            }
-            let name = item
-                .file_name()
-                .map(|n| n.to_os_string())
-                .unwrap_or_default();
-            let target = plan.dest_root.join(&name);
-            match layout::move_with_policy_landing(item, &target, cfg.conflict, true) {
-                Ok((st, landed)) => {
-                    stats.merge_public(st);
-                    if let Ok(rel) = landed.strip_prefix(&plan.dest_root) {
-                        produced_items.push(rel.to_string_lossy().to_string());
+        // Moving/cleaning trees is blocking filesystem work; keep it off the
+        // async worker so detection and progress stays responsive.
+        let land = {
+            let items = items;
+            let dest_root = plan.dest_root.clone();
+            let conflict = cfg.conflict;
+            let cancel = cancel.clone();
+            tokio::task::spawn_blocking(move || -> crate::error::Result<MoveStats> {
+                let mut stats = MoveStats::default();
+                for item in &items {
+                    if cancel.is_cancelled() {
+                        return Err(UpError::Cancelled);
                     }
+                    let name = item
+                        .file_name()
+                        .map(|n| n.to_os_string())
+                        .unwrap_or_default();
+                    let target = dest_root.join(&name);
+                    let (st, _landed) =
+                        layout::move_with_policy_landing(item, &target, conflict, true)?;
+                    stats.merge_public(st);
                 }
-                Err(e) => bail!(TaskStatus::Failed, e.to_string()),
-            }
-        }
+                Ok(stats)
+            })
+            .await
+            .unwrap_or_else(|join| {
+                Err(UpError::Other(format!("落地线程异常终止：{join}")))
+            })
+        };
+        let stats = match land {
+            Ok(landed) => landed,
+            Err(UpError::Cancelled) => bail!(TaskStatus::Cancelled, "已取消"),
+            Err(e) => bail!(TaskStatus::Failed, e.to_string()),
+        };
         if plan.foldered {
             if let Ok(mut rd) = fs::read_dir(&plan.dest_root) {
                 if rd.next().is_none() {
@@ -1440,7 +1486,14 @@ impl Engine {
             }
         };
         self.sz
-            .extract(archive, password, dest, cancel, &mut progress)
+            .extract_with_options(
+                archive,
+                password,
+                dest,
+                self.cfg.strip_junk,
+                cancel,
+                &mut progress,
+            )
             .await
             .map(|_| ())
     }
@@ -2495,6 +2548,84 @@ mod tests {
             );
             // Nothing is persisted until a batch explicitly saves.
             assert!(!dir.join(format!("{tag}.json")).exists());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A .docx inside an archive is a ZIP container too. Cascading into it would
+    /// scatter the document across the output, so the default keeps it intact.
+    #[tokio::test]
+    async fn nested_document_container_is_preserved_unless_forced() {
+        let Ok(seven_zip) = SevenZip::locate(None) else {
+            eprintln!("7-Zip not available; skipping document-container test");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "upzip-doc-container-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let src = dir.join("src");
+        std::fs::create_dir_all(src.join("word")).unwrap();
+        std::fs::write(src.join("word").join("document.xml"), b"<doc/>").unwrap();
+        assert!(std::process::Command::new(&seven_zip.exe)
+            .args(["a", "-tzip", "-mx=0", "doc.docx", "word/document.xml"])
+            .current_dir(&src)
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new(&seven_zip.exe)
+            .args(["a", "-tzip", "-mx=0", "outer.zip", "doc.docx"])
+            .current_dir(&src)
+            .status()
+            .unwrap()
+            .success());
+        let archive = src.join("outer.zip");
+        let exe = seven_zip.exe.clone();
+
+        for (force, tag) in [(false, "keep"), (true, "force")] {
+            let out_root = dir.join(format!("out-{tag}"));
+            std::fs::create_dir_all(&out_root).unwrap();
+            let cfg = RunConfig {
+                output_root: Some(out_root.clone()),
+                jobs: 1,
+                nested: true,
+                skip_processed: false,
+                force_documents: force,
+                processed_path: Some(dir.join(format!("{tag}.json"))),
+                ..Default::default()
+            };
+            let engine = Engine::new(SevenZip::new(exe.clone()), cfg);
+            let outcome = engine
+                .process_file(
+                    1,
+                    &archive,
+                    &CancelToken::new(),
+                    &PauseGate::new(),
+                    &mut |_| {},
+                )
+                .await;
+            assert_eq!(
+                outcome.status,
+                Some(TaskStatus::Success),
+                "force={force} reason: {:?}",
+                outcome.reason
+            );
+            // A single top-level item lands directly in the output root (smart layout).
+            let dest = out_root.clone();
+            if force {
+                assert!(
+                    dest.join("word").join("document.xml").exists(),
+                    "forced expansion must expose the document content: {:?}",
+                    outcome.warnings
+                );
+                assert!(!dest.join("doc.docx").exists());
+            } else {
+                assert!(
+                    dest.join("doc.docx").is_file(),
+                    "default must keep the document container intact"
+                );
+                assert!(!dest.join("word").exists());
+            }
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

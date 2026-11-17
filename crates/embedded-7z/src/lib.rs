@@ -45,8 +45,8 @@ pub enum Embedded7zError {
 ///
 /// Windows 上返回 `Ok(Some(path))`；其他平台返回 `Ok(None)`（不内嵌）。
 /// 调用方把这个路径作为 `SevenZip::locate` 的显式路径，从而优先于外部
-/// 7-Zip 安装；用户仍可用 `UNPARANOIA_7Z` 显式覆盖（locate 里环境变量先于
-/// 内嵌路径时需注意顺序，见调用方实现）。
+/// 7-Zip 安装；用户仍可用 `UPZIP_7Z`（兼容旧名 `UNPARANOIA_7Z`）显式覆盖
+/// （locate 里环境变量先于内嵌路径时需注意顺序，见调用方实现）。
 pub fn ensure_7z() -> Result<Option<PathBuf>, Embedded7zError> {
     #[cfg(windows)]
     {
@@ -58,9 +58,38 @@ pub fn ensure_7z() -> Result<Option<PathBuf>, Embedded7zError> {
     }
 }
 
+/// Cache folder for the embedded 7-Zip runtime.
+///
+/// `UPZIP_7Z_CACHE_DIR` wins, the pre-0.4.0 `UNPARANOIA_7Z_CACHE_DIR` still works;
+/// both get a version/revision leaf so an upgrade never reuses stale binaries.
+#[cfg(any(windows, test))]
+fn cache_dir() -> Result<PathBuf, Embedded7zError> {
+    let leaf = format!("{SEVEN_ZIP_VERSION}-r{CACHE_REV}");
+    if let Some(raw) = std::env::var_os("UPZIP_7Z_CACHE_DIR")
+        .or_else(|| std::env::var_os("UNPARANOIA_7Z_CACHE_DIR"))
+    {
+        if !raw.is_empty() {
+            return Ok(PathBuf::from(raw).join(leaf));
+        }
+    }
+    if let Some(raw) = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(raw)
+            .join("Upzip")
+            .join("embedded-7z")
+            .join(leaf));
+    }
+    let temp = std::env::temp_dir();
+    if temp.as_os_str().is_empty() {
+        return Err(Embedded7zError::NoCacheDir);
+    }
+    Ok(temp.join("upzip-embedded-7z").join(leaf))
+}
+
 #[cfg(windows)]
 mod imp {
-    use super::{Embedded7zError, CACHE_REV, DLL_FILE, EXE_FILE, SEVEN_ZIP_VERSION};
+    use super::{
+        cache_dir, Embedded7zError, CACHE_REV, DLL_FILE, EXE_FILE, SEVEN_ZIP_VERSION,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -98,26 +127,6 @@ mod imp {
         fs::metadata(path)
             .map(|m| m.is_file() && m.len() == expected as u64)
             .unwrap_or(false)
-    }
-
-    fn cache_dir() -> Result<PathBuf, Embedded7zError> {
-        let leaf = format!("{SEVEN_ZIP_VERSION}-r{CACHE_REV}");
-        if let Some(raw) = std::env::var_os("UPZIP_7Z_CACHE_DIR").or_else(|| std::env::var_os("UPZIP_7Z_CACHE_DIR")) {
-            if !raw.is_empty() {
-                return Ok(PathBuf::from(raw).join(leaf));
-            }
-        }
-        if let Some(raw) = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()) {
-            return Ok(PathBuf::from(raw)
-                .join("Upzip")
-                .join("embedded-7z")
-                .join(leaf));
-        }
-        let temp = std::env::temp_dir();
-        if temp.as_os_str().is_empty() {
-            return Err(Embedded7zError::NoCacheDir);
-        }
-        Ok(temp.join("upzip-embedded-7z").join(leaf))
     }
 
     fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Embedded7zError> {
@@ -163,6 +172,33 @@ mod tests {
     fn version_is_reported() {
         assert_eq!(SEVEN_ZIP_VERSION, "25.01");
         assert!(CACHE_REV >= 1);
+    }
+
+    /// The renamed cache variable wins, the pre-0.4.0 name still works.
+    #[test]
+    fn cache_dir_env_override_prefers_new_name() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let leaf = format!("{SEVEN_ZIP_VERSION}-r{CACHE_REV}");
+        let previous_new = std::env::var_os("UPZIP_7Z_CACHE_DIR");
+        let previous_legacy = std::env::var_os("UNPARANOIA_7Z_CACHE_DIR");
+        std::env::remove_var("UPZIP_7Z_CACHE_DIR");
+        std::env::set_var("UNPARANOIA_7Z_CACHE_DIR", "/legacy/cache");
+        assert_eq!(
+            cache_dir().unwrap(),
+            PathBuf::from("/legacy/cache").join(&leaf)
+        );
+        std::env::set_var("UPZIP_7Z_CACHE_DIR", "/new/cache");
+        assert_eq!(cache_dir().unwrap(), PathBuf::from("/new/cache").join(&leaf));
+        match previous_new {
+            Some(value) => std::env::set_var("UPZIP_7Z_CACHE_DIR", value),
+            None => std::env::remove_var("UPZIP_7Z_CACHE_DIR"),
+        }
+        match previous_legacy {
+            Some(value) => std::env::set_var("UNPARANOIA_7Z_CACHE_DIR", value),
+            None => std::env::remove_var("UNPARANOIA_7Z_CACHE_DIR"),
+        }
     }
 
     #[test]

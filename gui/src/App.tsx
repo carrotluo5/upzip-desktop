@@ -34,6 +34,13 @@ import {
   statusLabel,
   themeLabel,
 } from "./utils";
+import {
+  FINISHED_TASK_RESET,
+  displayVersion,
+  finishedPercent,
+  isPasswordEmpty,
+  passwordToSubmit,
+} from "./task-logic";
 import { KeyIcon, LogIcon, QueueIcon, SettingsIcon } from "./components/Icons";
 import { QueueTab } from "./components/QueueTab";
 import { PasswordsTab } from "./components/PasswordsTab";
@@ -72,13 +79,16 @@ export default function App() {
     tasksRef.current = tasks;
   }, [tasks]);
 
-  const pushLog = useCallback((line: string) => {
+  // The backend already writes every TaskEvent into upzip.log, so lines that
+  // only mirror backend events pass `persist = false` instead of duplicating
+  // them on disk.
+  const pushLog = useCallback((line: string, persist = true) => {
     const stamp = new Date().toLocaleTimeString("zh-CN", { hour12: false });
     setLogs((prev) => {
       const next = prev.concat("[" + stamp + "] " + line);
       return next.length > 2000 ? next.slice(next.length - 2000) : next;
     });
-    void invoke("append_log", { line }).catch(() => {});
+    if (persist) void invoke("append_log", { line }).catch(() => {});
   }, []);
 
   const patchByKey = useCallback((key: string, patch: Partial<Task>) => {
@@ -193,13 +203,14 @@ export default function App() {
 
   const addPassword = useCallback(
     async (raw: string): Promise<boolean> => {
-      const value = raw.trim();
-      if (value.length === 0) {
+      // Passwords may legitimately start or end with spaces: reject only the
+      // empty string, matching upzip-core / upzip-cli.
+      if (isPasswordEmpty(raw)) {
         setToast("密码不能为空");
         return false;
       }
       try {
-        const added = await invoke<boolean>("add_password", { password: value });
+        const added = await invoke<boolean>("add_password", { password: raw });
         if (added) {
           pushLog("已添加密码到密码库（明文保存）");
           setToast("已添加到密码库");
@@ -284,7 +295,6 @@ export default function App() {
         return;
       }
       const effective: Settings = { ...settings, ...(override ?? {}) };
-      const trimmed = password.trim();
       setSummary(null);
       setLive({ ...EMPTY_COUNTS });
       setBatchKeys(files);
@@ -297,7 +307,7 @@ export default function App() {
       setTasks((prev) => prev.map((t) => (files.includes(t.key) ? { ...t, ...REQUEUE } : t)));
       const req: StartRequest = {
         files,
-        password: trimmed.length > 0 ? trimmed : null,
+        password: passwordToSubmit(password),
         rememberPassword,
         settings: effective,
       };
@@ -305,7 +315,7 @@ export default function App() {
       pushLog("开始批次：共 " + files.length + " 个文件");
       try {
         await invoke("start_batch", { req });
-        if (rememberPassword && trimmed.length > 0) {
+        if (rememberPassword && !isPasswordEmpty(password)) {
           setPassword("");
           setRememberPassword(false);
           pushLog("本次密码已保存到密码库");
@@ -639,6 +649,9 @@ export default function App() {
     (async () => {
       const unlistenEvent = await listen<TaskEvent>("upzip://event", (event) => {
         const ev = event.payload;
+        // Backend events are already persisted by run_batch_thread; only show
+        // them in the UI log.
+        const logEvent = (line: string) => pushLog(line, false);
         switch (ev.type) {
           case "task_queued": {
             idKey.current.set(ev.id, ev.path);
@@ -655,7 +668,7 @@ export default function App() {
           case "task_detected": {
             patchById(ev.id, { detection: ev.detection, size: ev.detection.size });
             const key = idKey.current.get(ev.id);
-            pushLog(
+            logEvent(
               "识别 " +
                 (key ? basename(key) : "#" + ev.id) +
                 "：" +
@@ -677,11 +690,11 @@ export default function App() {
             break;
           }
           case "task_password_attempt": {
-            pushLog("#" + ev.id + " 尝试密码（" + ev.source + "）：" + (ev.ok ? "通过" : "失败") + "，第 " + ev.tried + " 次");
+            logEvent("#" + ev.id + " 尝试密码（" + ev.source + "）：" + (ev.ok ? "通过" : "失败") + "，第 " + ev.tried + " 次");
             break;
           }
           case "task_password_missing": {
-            pushLog("#" + ev.id + " 没有可用密码（已尝试 " + ev.tried + " 个）");
+            logEvent("#" + ev.id + " 没有可用密码（已尝试 " + ev.tried + " 个）");
             break;
           }
           case "task_finished": {
@@ -725,7 +738,9 @@ export default function App() {
               bytes: outcome.bytes,
               elapsed_ms: outcome.elapsed_ms,
               password_source: outcome.password_source ?? null,
-              percent: outcome.status === "success" || outcome.status === "skipped" ? 100 : null,
+              percent: finishedPercent(outcome.status),
+              // Finished tasks must not keep showing stale progress text.
+              ...FINISHED_TASK_RESET,
             };
             if (outcome.detection) patch.detection = outcome.detection;
             patchById(ev.id, patch);
@@ -735,8 +750,9 @@ export default function App() {
               const relatedPatch: Partial<Task> = {
                 phase: "done",
                 status: outcome.status,
-                percent: outcome.status === "success" || outcome.status === "skipped" ? 100 : null,
+                percent: finishedPercent(outcome.status),
                 reason: mergedReason,
+                ...FINISHED_TASK_RESET,
               };
               const knownKeys = new Set(tasksRef.current.map((t) => t.key));
               for (const rel of related) {
@@ -746,12 +762,12 @@ export default function App() {
               }
             }
             if (outcome.status === "failed" || outcome.status === "needs_password") {
-              pushLog(basename(outcome.path) + " " + statusLabel(outcome.status) + "：" + (outcome.reason ?? "无详情"));
+              logEvent(basename(outcome.path) + " " + statusLabel(outcome.status) + "：" + (outcome.reason ?? "无详情"));
             }
             break;
           }
           case "log": {
-            pushLog(ev.line);
+            logEvent(ev.line);
             break;
           }
         }
@@ -957,7 +973,7 @@ export default function App() {
           )}
           <div className="brand-text">
             <div className="brand-name">Upzip</div>
-            <div className="brand-ver">v{info ? info.version : "0.3.3"}</div>
+            <div className="brand-ver">v{displayVersion(info, __APP_VERSION__)}</div>
           </div>
         </div>
 

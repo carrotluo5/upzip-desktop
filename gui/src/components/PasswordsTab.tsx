@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { maskPassword, CSS_MASK_SUPPORTED } from "../utils";
 import { EyeIcon } from "./Icons";
+import { isPasswordEmpty } from "../task-logic";
 
 interface PasswordsTabProps {
   passwords: string[];
@@ -64,7 +65,7 @@ export function PasswordsTab({
               if (e.key === "Enter") void handleAdd();
             }}
           />
-          <button className="btn-primary" onClick={() => void handleAdd()} disabled={input.trim().length === 0}>
+          <button className="btn-primary" onClick={() => void handleAdd()} disabled={isPasswordEmpty(input)}>
             添加密码
           </button>
         </div>

@@ -1,16 +1,16 @@
-//! Tauri v2 shell for the merged Paranoia decryptor / archive extractor.
+//! Tauri v2 shell for Upzip (SSEFE v4 decryptor + archive extractor).
 //!
-//! The heavy lifting lives in `unparanoia-core` (SSEFE v4 decryption) and
-//! `unparanoia-unpack-core` (detect / batch extract / layout / processed store).
+//! The heavy lifting lives in `upzip-core` (SSEFE v4 decryption) and
+//! `upzip-unpack-core` (detect / batch extract / layout / processed store).
 //! This file only owns:
 //!
 //! * the single-flight batch state (running / paused / cancel token / summary),
 //! * the persisted plain-text settings and the plain-text password store bridge,
 //! * the two event streams the React frontend consumes:
-//!   - `unparanoia://event` — every `TaskEvent` (queued / stage / detected /
+//!   - `upzip://event` — every `TaskEvent` (queued / stage / detected /
 //!     progress / password_attempt / password_missing / finished / log),
 //!     serialized exactly as the engine emits it (tag = `type`, snake_case);
-//!   - `unparanoia://done` — the final `Summary` of the batch.
+//!   - `upzip://done` — the final `Summary` of the batch.
 //!
 //! The password store is kept in plain text by `upzip_core::config`
 //! (0600 on unix). Passwords are never logged.
@@ -42,7 +42,7 @@ pub const EVENT_DONE: &str = "upzip://done";
 
 /// Sub-directory of the configuration directory that holds the persistent log.
 const LOG_DIR_NAME: &str = "logs";
-/// Persistent GUI log file name; rotated to unparanoia.log.1 once it grows
+/// Persistent GUI log file name; rotated to upzip.log.1 once it grows
 /// past LOG_MAX_BYTES.
 const LOG_FILE_NAME: &str = "upzip.log";
 /// Log rotation threshold (2 MiB); exactly one previous file is kept.
@@ -126,11 +126,11 @@ impl Drop for RunningGuard<'_> {
 
 fn locate_sevenzip() -> Result<SevenZipInfo, String> {
     // Priority matches the CLI: explicit --sevenzip (the GUI has none) >
-    // UPZIP_7Z / UPZIP_7Z environment override > embedded 7-Zip >
+    // UPZIP_7Z / UNPARANOIA_7Z environment override > embedded 7-Zip >
     // automatic search. SevenZip::locate(None) already honours the two env
     // vars, so when one points at a real file we must not pass the embedded
     // path: an explicit path is checked before the env vars and would win.
-    let env_override = ["UPZIP_7Z", "UPZIP_7Z"].iter().any(|variable| {
+    let env_override = ["UPZIP_7Z", "UNPARANOIA_7Z"].iter().any(|variable| {
         std::env::var_os(variable)
             .filter(|value| !value.is_empty())
             .map(|value| PathBuf::from(value).is_file())
@@ -220,7 +220,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (year, month as u32, day as u32)
 }
 
-/// Rotate unparanoia.log -> unparanoia.log.1 when it exceeds the limit.
+/// Rotate upzip.log -> upzip.log.1 when it exceeds the limit.
 fn rotate_log_if_needed(path: &std::path::Path) -> std::io::Result<()> {
     let size = match std::fs::metadata(path) {
         Ok(metadata) => metadata.len(),
@@ -343,7 +343,7 @@ fn describe_task_event(event: &TaskEvent) -> String {
 
 /// Where the resolved 7-Zip binary probably came from (log only).
 fn seven_zip_source(info: &SevenZipInfo) -> String {
-    for variable in ["UPZIP_7Z", "UPZIP_7Z"] {
+    for variable in ["UPZIP_7Z", "UNPARANOIA_7Z"] {
         if let Some(value) = std::env::var_os(variable).filter(|value| !value.is_empty()) {
             if PathBuf::from(value) == info.exe {
                 return format!("环境变量 {variable}");
@@ -451,9 +451,12 @@ fn startup_paths(state: State<'_, AppState>) -> Vec<String> {
 /// output root is excluded so a second pass never picks up what it extracted.
 #[tauri::command]
 fn expand_paths(state: State<'_, AppState>, paths: Vec<String>) -> Vec<String> {
-    let exclude = lock(&state.settings).output_root.clone();
+    let settings = lock(&state.settings);
+    let exclude = settings.output_root.clone();
+    let recursive = settings.recursive;
+    drop(settings);
     let inputs: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-    expand_inputs(&inputs, true, exclude.as_deref())
+    expand_inputs(&inputs, recursive, exclude.as_deref())
         .into_iter()
         .map(|path| display_path(&path))
         .collect()
@@ -568,7 +571,7 @@ fn start_batch(
 
     let output_root = req.settings.output_root.clone();
     let inputs: Vec<PathBuf> = req.files.iter().map(PathBuf::from).collect();
-    let files = expand_inputs(&inputs, true, output_root.as_deref());
+    let files = expand_inputs(&inputs, req.settings.recursive, output_root.as_deref());
     if files.is_empty() {
         append_log_line("start_batch 失败：没有找到可处理的文件");
         return Err("没有找到可处理的文件".into());
@@ -634,7 +637,7 @@ fn start_batch(
 }
 
 /// Batch worker body: run the engine, persist the processed store, reset the
-/// shared state and always emit `unparanoia://done`.
+/// shared state and always emit `upzip://done`.
 fn run_batch_thread(
     handle: AppHandle,
     engine: Arc<Engine>,
@@ -986,7 +989,7 @@ fn reveal_path(path: String) -> Result<(), String> {
     }
 }
 
-/// Remove leftover staging folders (`.unparanoia-tmp-*`) under the given roots.
+/// Remove leftover staging folders (`.upzip-tmp-*`) under the given roots.
 #[tauri::command]
 fn cleanup_staging(roots: Vec<String>) -> Result<usize, String> {
     // Empty list = "clean whatever the app may have left behind": the system

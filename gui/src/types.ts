@@ -68,7 +68,7 @@ export type TaskEvent =
   | { type: "task_queued"; id: number; path: string; size: number }
   | { type: "task_stage"; id: number; stage: string; detail?: string | null }
   | { type: "task_detected"; id: number; detection: Detection }
-  | { type: "task_progress"; id: number; percent: number; line?: string | null }
+  | { type: "task_progress"; id: number; percent: number | null; line?: string | null }
   | { type: "task_password_attempt"; id: number; source: string; ok: boolean; tried: number }
   | { type: "task_password_missing"; id: number; tried: number }
   | { type: "task_finished"; id: number; outcome: TaskOutcome }
@@ -175,7 +175,7 @@ export const DEFAULT_SETTINGS: Settings = {
   nested: true,
   maxDepth: 4,
   stopOnError: false,
-  tryEmptyPassword: true,
+  tryEmptyPassword: false,
   allowExecuteSfx: false,
   recursive: true,
   minFreeRatio: 1.1,

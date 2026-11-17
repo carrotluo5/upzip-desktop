@@ -77,7 +77,7 @@ pub(crate) fn extract_zip(
         fs::create_dir_all(&parent)?;
 
         let expected_size = entry.size();
-        let temp = util::unique_temp_path(&parent, ".paranoia-enc-extract-");
+        let temp = util::unique_temp_path(&parent, ".upzip-enc-extract-");
         let guard = util::TempGuard::new(temp.clone());
         {
             let mut writer = BufWriter::new(File::create(&temp)?);
@@ -163,7 +163,7 @@ pub fn extract_single_entry_to_path(zip_path: &Path, dest_path: &Path) -> Result
     }
     let expected_size = entry.size();
     let parent = dest_path.parent().unwrap_or_else(|| Path::new("."));
-    let temp = util::unique_temp_path(parent, ".paranoia-enc-unwrap-");
+    let temp = util::unique_temp_path(parent, ".upzip-enc-unwrap-");
     let guard = util::TempGuard::new(temp.clone());
     {
         let mut writer = BufWriter::with_capacity(1 << 20, File::create(&temp)?);
