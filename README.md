@@ -11,8 +11,8 @@ macOS 和 Windows 都有，界面是 Tauri，解包内核是 Rust。
 
 | 系统 | 文件 |
 |---|---|
-| macOS（Apple Silicon） | `Upzip-0.4.0-macos-arm64.dmg` |
-| Windows x64（免安装） | `Upzip-0.4.0-win-x64-portable.zip` |
+| macOS（Apple Silicon） | `Upzip-0.4.1-macos-arm64.dmg` |
+| Windows x64（免安装） | `Upzip-0.4.1-win-x64-portable.zip` |
 | 校验 | `SHA256SUMS.txt` |
 
 macOS 版没签名也没公证，第一次打开会被拦，右键点应用选「打开」就行。
