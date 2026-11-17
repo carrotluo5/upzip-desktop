@@ -267,30 +267,32 @@ jobs:
           set -euo pipefail
           VERSION="${{ steps.tag.outputs.version }}"
           {
-            echo "Upzip ${VERSION} — macOS / Windows 批量智能解压工具。"
+            echo "Upzip ${VERSION} — 拖入即解的桌面批量解压工具（支持 zip / 7z / rar、分卷、伪装容器、自解压与 Paranoia v4 \`.enc\` 加密文件）。"
             echo
-            echo "本页产物由 GitHub Actions 在真实 macOS runner 与 Windows runner 上构建。"
+            echo '## 下载与安装'
             echo
-            echo "## 下载"
+            echo '| 平台 | 文件 | 说明 |'
+            echo '| --- | --- | --- |'
+            echo "| macOS 12+ (Apple Silicon) | \`Upzip-${VERSION}-macos-*.dmg\` | 桌面安装镜像（拖入「应用程序」即可） |"
+            echo "| macOS 12+ (Apple Silicon) | \`Upzip-${VERSION}-macos-*.app.zip\` | 免镜像版 \`Upzip.app\` 压缩包 |"
+            echo "| Windows 10/11 (x64) | \`Upzip-${VERSION}-win-x64-portable.zip\` | 免安装便携包，含 \`Upzip.exe\` 与 \`upzip-cli.exe\` |"
             echo
-            echo "| 文件 | 平台 | 说明 |"
-            echo "| --- | --- | --- |"
-            echo "| \`Upzip-${VERSION}-macos-*.dmg\` | macOS | 安装镜像；ad-hoc 签名未公证，首次打开需右键「打开」 |"
-            echo "| \`Upzip-${VERSION}-macos-*.app.zip\` | macOS | 已解压好的 .app，未签名情况同上 |"
-            echo "| \`Upzip-${VERSION}-win-x64-portable.zip\` | Windows 10/11 x64 | 解压即用，免安装；需要 WebView2 Runtime；未签 Authenticode |"
+            echo '## 首次打开提示'
             echo
-            echo "## 校验和"
+            echo '- **macOS**：当前包未做开发者签名与公证，首次打开若被拦截，请**右键应用 →「打开」**（或在系统设置「隐私与安全性」点击「仍要打开」）。macOS 发行包仅包含图形界面。'
+            echo '- **Windows**：解压即可直接运行 `Upzip.exe`（桌面端）或 `upzip-cli.exe`（命令行），均已内嵌 7-Zip 25.01；未做代码签名，若弹出 SmartScreen 请选择「仍要运行」（Windows 10 需安装 WebView2 Runtime）。'
+            echo
+            echo '## SHA-256 校验和'
             echo
             echo '```'
             cat release-assets/SHA256SUMS.txt
             echo '```'
             echo
-            echo "## 说明"
+            echo '## 注意事项'
             echo
-            echo "- macOS 版只发布 GUI（Upzip.app）；Windows 包内为 \`Upzip.exe\` + \`upzip-cli.exe\`，两个 exe 都内嵌 7-Zip 25.01。"
-            echo "- macOS 包未做开发者签名与公证；Windows 包未签 Authenticode，首次运行可能触发 SmartScreen 提示。"
-            echo "- 只解压不加密；不支持 Paranoia v3 加密容器；GUI 内输入的密码保存在本地明文配置中，CLI 密码经 argv 传给子进程。"
-            echo "- 更完整的使用说明见仓库 README。"
+            echo '- 仅支持解压与解密，不提供加密功能，不支持 Paranoia v3 与 `PFTEREC1` 恢复容器。'
+            echo '- 密码库为本地明文配置；向 7-Zip 子进程传递密码在 macOS/Linux 默认走标准输入，在 Windows 默认走命令行参数。'
+            echo '- 所有构建产物均由 GitHub Actions 在 macOS / Windows 环境自动编译并验证；详细用法与配置说明见仓库 [README](https://github.com/carrotluo5/upzip-desktop#readme)。'
           } > release-notes.md
 
       - name: Create or update release
